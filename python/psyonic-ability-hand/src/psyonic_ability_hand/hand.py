@@ -1,15 +1,16 @@
+import asyncio
 import array
 import dataclasses
 import struct
 import time
 from enum import Enum, IntEnum
-from typing import Any, IO, Protocol, List
+from typing import Any, IO, Protocol, List, Optional
 from dataclasses import dataclass
 import numpy as np
+import evdev
 
 from loguru import logger as log
 
-from .io import I2cIo
 
 
 class Mode(IntEnum):
@@ -37,7 +38,7 @@ class JointData:
     Ring: float = 0
     Pinky: float = 0
     ThumbFlexor: float = 0
-    ThumbRotate: float = 0
+    ThumbRotator: float = 0
 
     def to_list(self):
         return dataclasses.astuple(self)
@@ -46,9 +47,12 @@ class JointData:
 """
 Finger  | Index     | Middle    |  Ring     | Pinky     | ThumbF    | ThumbR
 ----
-I: s0
+I: s0    14.2 - 74.6
 M: s1
-
+R: 
+P:
+T1:
+T2:
 
 
 
@@ -83,7 +87,6 @@ class PressureData:
         for finger in range(0, PressureData.NUM_FINGERS):
             i = finger * PressureData.NUM_FINGERS
             p = FingerPressure(*data[i : i + PressureData.NUM_FINGERS])
-            log.info(f"i:{i}: {p}")
             pressures.append(p)
 
         return PressureData(*pressures)
@@ -92,18 +95,41 @@ class PressureData:
 class HandException(Exception):
     pass
 
-
 class RcvError(Exception):
     pass
+
+class TxError(Exception):
+    pass
+
+class FingerPosition:
+    @staticmethod
+    def to_int16(degrees:float):
+        return int( (degrees * 32767) / 150 )
+
+    @staticmethod
+    def from_int16(data:int):
+        return (data * 150) / 32767.0
+
+class FingerVelocity:
+    @staticmethod
+    def to_int16(degrees_per_second:float):
+        return degrees_per_second * 32767 / 3000
+
+class Finger:
+    def __init__(self, gear_ratio):
+        self.gear_ratio = gear_ratio
 
 
 class Hand:
     def __init__(self, comm: IO):
-        self._comm: IO = comm
+        self._comm = comm
 
     def checksum(self, d: array.array):
-        v = np.cast["int8"](np.sum(d, dtype=np.int8))
-        return -v
+        c = 0
+        for i in d:
+            c = (c + i) & 0xFF
+        c = (-c) & 0xFF
+        return c
 
     def _txbuf(self) -> array.array:
         return array.array("B", [0] * 26)
@@ -113,6 +139,7 @@ class Hand:
         ret = self._comm.write(data)
         if ret != len(data):
             raise HandException(f"write error: {ret}")
+        return ret
 
     def unpack(self, data) -> array.array:
         dout = array.array("H")
@@ -154,19 +181,19 @@ class Hand:
         buf[0] = mode
         self.write(buf)
 
-    def control_v1(self, mode: Mode, jointdata: JointData):
+    def control_v1(self, mode: Mode, jointdata: Optional[JointData]=None):
         """
         Writes JointData and returns current status
         """
         RXPACKET_SIZE = 71
-        if mode != Mode.Query:
+        if mode != Mode.Query and jointdata != None:
             buf = array.array("B", struct.pack("<B6fB", mode, *jointdata.to_list(), 0))
             self.write(buf)
 
         packet = self._comm.read(RXPACKET_SIZE)
 
         if len(packet) != RXPACKET_SIZE:
-            raise RcvError()
+            raise RcvError(f"only received {len(packet)} bytes")
 
         data = struct.unpack("<6f45BBB", packet)
 
@@ -174,7 +201,7 @@ class Hand:
         pressure = PressureData.from_array(self.unpack(data[6:-2]))
         status = data[-2]
         checksum = data[-1]
-        calculated_checksum = self.checksum(packet[:-1])
+        calculated_checksum = self.checksum(array.array('B', packet[:-1]))
 
         if checksum != calculated_checksum:
             raise RcvError("checksum failed")
@@ -182,10 +209,183 @@ class Hand:
         return (jd, pressure, status)
 
 
-if __name__ == "__main__":
-    hand = Hand(I2cIo())
+class App:
 
-    hand.set_grip(Grip.Open)
-    time.sleep(3.0)
-    hand.set_grip(Grip.Handshake)
-    time.sleep(3.0)
+    RUN = True
+
+
+
+if __name__ == "__main__":
+
+
+    from rich.console import Console, Group
+    from rich.columns import Columns
+    from rich.live import Live
+    from rich.bar import Bar
+    from rich.text import Text
+    from rich.progress_bar import ProgressBar
+    from rich.table import Table
+    from rich.layout import Layout
+    from psyonic_ability_hand.io import I2CIO
+    import sys, termios, tty, select
+    import threading, queue
+    from decimal import *
+
+    async def display(app):
+        mode = 0
+
+        console = Console()
+
+        log.info("creating I2C connection to hand")
+        hand = Hand(I2CIO())
+
+        # log.info("setting grip open")
+        hand.set_grip(Grip.Open)
+        # time.sleep(6.0)
+        # log.info("setting grip closed")
+        # hand.set_grip(Grip.Handshake)
+        # time.sleep(6.0)
+        # log.info("setting grip pinched")
+        # hand.set_grip(Grip.PinchGrasp)
+        # time.sleep(6.0)
+
+        start = time.time()
+        errors = 0
+
+        layout = Layout()
+
+        layout.split(
+            Layout(name="info", size=2),
+            Layout(name="header", size=1),
+            Layout(name="errors", size=1),
+            Layout(name="table")
+        )
+
+
+        pos_input = None
+        torque_input = None
+        velocity_input = None
+
+        layout["info"].update("Move fingers with a,z | s,x | d,c | f,v | gb, hn. Change mode with 'm'. ")
+        layout["header"].update("")
+        layout["errors"].update("")
+
+
+        try:
+
+            with Live(auto_refresh=False) as screen:
+                while app.RUN and (t:=time.time() - start): #< 100:
+                    data = None
+
+                    while not app.q.empty():
+                        key = app.q.get_nowait()
+
+                        def update_joint_data(val, keys):
+                            if key is not None and key in keys:
+                               val += (-1 if key == keys[0] else 1)
+                            return val
+
+                        if key == 'm':
+                            mode = (mode + 1) % 3
+                            layout['header'].update( Text( f'Mode: {mode}'))
+                        elif pos_input:
+                            pos_input.Pinky = update_joint_data(pos_input.Pinky, ['a','z'])
+                            pos_input.Ring = update_joint_data(pos_input.Ring, ['s','x'])
+                            pos_input.Middle = update_joint_data(pos_input.Middle, ['d','c'])
+                            pos_input.Index = update_joint_data(pos_input.Index, ['f','v'])
+                            pos_input.ThumbFlexor = update_joint_data(pos_input.ThumbFlexor, ['g','b'])
+                            pos_input.ThumbRotator = update_joint_data(pos_input.ThumbRotator, ['h','n'])
+
+
+                    try:
+                        data = hand.control_v1(Mode.PosControl, pos_input or JointData() )
+                    except ( OSError, RcvError, TxError ):
+                        errors += 1
+                        continue
+
+
+                    table = Table(padding=(0,1))
+                    table.add_column("Item")
+                    table.add_column("Requested")
+                    table.add_column("Position")
+                    table.add_column("Pressures")
+
+                    if data is not None:
+                        (_position,_pressure,_status) = data
+
+                        if not pos_input:
+                            pos_input = _position
+        
+                        requested = dataclasses.asdict(pos_input)
+
+                        # return { 'name' : position, ... }
+                        position = dataclasses.asdict(_position)
+                        # returns { 'name' : [pressures,], ...}
+                        pressure = dataclasses.asdict(_pressure)
+
+                        for finger in position:
+                            pres = pressure.get(finger)
+
+                            requested_col = f"{requested[finger]:> 12.6f}"
+                            position_col = f"{position[finger]:> 12.6f}"
+
+                            pressure_col = ''
+                            if pres:
+                                pressure_col = Columns( [ f"{p:> 12d}" for p in pres.values() ], equal=True )
+
+                            table.add_row(finger, requested_col, position_col, pressure_col)
+                    else:
+                        errors += 1    
+
+                    layout["errors"].update(f"Errors: {errors}")
+                    layout['table'].update(table)
+                    screen.update(layout, refresh=True)
+                    await asyncio.sleep(.100)
+
+                app.RUN = False
+
+        except Exception as e:
+            print(e)
+            raise
+        finally:
+            pass
+            # termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+
+
+    def get_input(app):
+        old_settings = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+        try:
+            fds = ([sys.stdin], [], [])
+            ch = None
+            while app.RUN: 
+                if select.select(*fds, 0.010) == fds:
+                    ch = sys.stdin.read(1)
+                    app.loop.call_soon_threadsafe(app.q.put_nowait, ch)
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+            app.RUN=False
+
+
+
+    async def main(app):
+        await display(app)
+
+    app = App()
+    app.q = asyncio.Queue()
+    app.loop = asyncio.get_event_loop()
+    app.position = JointData()
+    app.velocity = JointData()
+    app.initialized = False
+
+    input_thread = threading.Thread(target=get_input, args=(app,) )
+    input_thread.start()
+
+    try:
+        app.loop.run_until_complete(main(app))        
+    except (Exception,KeyboardInterrupt):
+        app.RUN = False
+        input_thread.join()
+        print("exiting")
+        

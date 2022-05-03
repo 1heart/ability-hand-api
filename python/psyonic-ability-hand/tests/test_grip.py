@@ -66,6 +66,10 @@ def test_checksum(hand):
     data = hand._txbuf()
     data[0] = 0xAD
     checksum = hand.checksum(data)
+
+    data = [173, 46, 173, 30, 65, 194, 180, 28, 65, 215, 5, 29, 65, 151, 211, 29, 65, 157, 115, 30, 65, 69, 27, 17, 193, 0]
+    checksum = hand.checksum(data)
+    
     log.info(f"checksum: 0x{checksum:x}")
 
 

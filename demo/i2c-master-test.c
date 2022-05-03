@@ -42,6 +42,35 @@ uint8_t get_checksum(uint8_t * arr, int size)
 	return -checksum;
 }
 
+void printbuf(char mode, unsigned char* d, int len) {
+	char buf[4096] = {0};
+	char * p = buf;
+
+	p += sprintf(p, "%c: ", mode);
+
+	for(int i=0; i<len; i++){
+		p += sprintf(p, "%02X ", d[i]);
+	}
+
+	printf("%s\n", buf);
+
+}
+
+int bufwrite(int fd, unsigned char * d, int len) {
+	//printbuf('W', d, len);
+	return write(fd, d, len);
+}
+
+int bufread(int fd, unsigned char * d, int len) {
+	int ret = read(fd, d, len);
+
+	if(ret > 0) {
+		//printbuf('R', d, len);
+	} 
+
+	return ret;
+}
+
 
 /*
 Generic function which blindly sends out a hand grip index. 
@@ -64,7 +93,7 @@ int set_grip(grasp_cmd grip_idx, uint8_t speed)
 	i2c_buf[0] = GRIP_CTL_MODE;
     i2c_buf[1] = (uint8_t)grip_idx;
 	i2c_buf[2] = speed;
-	if (write(file_i2c, i2c_buf, len) != len)          //write() returns the number of bytes actually written, if it doesn't match then an error occurred (e.g. no response from the device)
+	if (bufwrite(file_i2c, i2c_buf, len) != len)          //write() returns the number of bytes actually written, if it doesn't match then an error occurred (e.g. no response from the device)
 		return -1;
 	return 0;
 }
@@ -79,7 +108,7 @@ int set_mode(uint8_t mode)
 		i2c_tx_buf[i] = 0;
 	i2c_tx_buf[0] = mode;
 	i2c_tx_buf[I2C_TX_SIZE-1] = get_checksum(i2c_tx_buf, I2C_TX_SIZE-1);
-	if (write(file_i2c, i2c_tx_buf, I2C_TX_SIZE) != I2C_TX_SIZE)          //write() returns the number of bytes actually written, if it doesn't match then an error occurred (e.g. no response from the device)
+	if (bufwrite(file_i2c, i2c_tx_buf, I2C_TX_SIZE) != I2C_TX_SIZE)          //write() returns the number of bytes actually written, if it doesn't match then an error occurred (e.g. no response from the device)
 		return -1;
 	return 0;
 }
@@ -100,6 +129,7 @@ void unpack_8bit_into_12bit(uint8_t* arr, uint16_t* vals, int valsize)
         vals[validx] |= ((arr[arridx] >> shift_val) & 0x0F) << (bidx % 12);
     }
 }
+
 
 
 /*
@@ -132,10 +162,10 @@ int api_frame_fmt_1(uint8_t mode, float_format_i2c * out, float * fpos, uint8_t 
 		
 		i2c_tx_buf[I2C_TX_SIZE-1] = get_checksum(i2c_tx_buf, I2C_TX_SIZE-1); //deliberate break of checksum for testing purposes
 		
-		if (write(file_i2c, i2c_tx_buf, I2C_TX_SIZE) != I2C_TX_SIZE)          //write() returns the number of bytes actually written, if it doesn't match then an error occurred (e.g. no response from the device)
+		if (bufwrite(file_i2c, i2c_tx_buf, I2C_TX_SIZE) != I2C_TX_SIZE)          //write() returns the number of bytes actually written, if it doesn't match then an error occurred (e.g. no response from the device)
 			ret |= 1;
 	}
-	if(read(file_i2c, i2c_rx_buf, I2C_RX_BUF_SIZE) != I2C_RX_BUF_SIZE)
+	if(bufread(file_i2c, i2c_rx_buf, I2C_RX_BUF_SIZE) != I2C_RX_BUF_SIZE)
 		ret |= (1 << 1);
 	else
 	{
@@ -162,6 +192,9 @@ int api_frame_fmt_1(uint8_t mode, float_format_i2c * out, float * fpos, uint8_t 
 	
 	return ret;
 }
+
+
+
 
 
 /*
@@ -194,12 +227,13 @@ int api_frame_fmt_2(uint8_t mode, float_format_i2c * out, float fpos[NUM_CHANNEL
 		
 		i2c_tx_buf[I2C_TX_SIZE-1] = get_checksum(i2c_tx_buf, I2C_TX_SIZE-1); //deliberate break of checksum for testing purposes
 		
-		if (write(file_i2c, i2c_tx_buf, I2C_TX_SIZE) != I2C_TX_SIZE)          //write() returns the number of bytes actually written, if it doesn't match then an error occurred (e.g. no response from the device)
+		if (bufwrite(file_i2c, i2c_tx_buf, I2C_TX_SIZE) != I2C_TX_SIZE)          //write() returns the number of bytes actually written, if it doesn't match then an error occurred (e.g. no response from the device)
 			ret |= 1;
 	}
 	
-	if(read(file_i2c, i2c_rx_buf, I2C_RX_BUF_SIZE) != I2C_RX_BUF_SIZE)
+	if(read(file_i2c, i2c_rx_buf, I2C_RX_BUF_SIZE) != I2C_RX_BUF_SIZE) {
 		ret |= (1 << 1);
+	}
 	else
 	{
 		/*Load the i2c byte array into an array of type punned words*/
