@@ -6,18 +6,18 @@ import serial
 #GPIO.setup(18, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 port = "/dev/ttyUSB0"
-baud = 115200
+baud = 460800
 
 print(f"opening {port} at {baud}")
 #ser=serial.Serial("/dev/ttyS0", baud)
 ser=serial.Serial(port, baud, timeout=0.100)
 
-tx=b"abcdefghijgklmnopqrtuvwxyz" * 20
+tx=b"abcdefghijgklmnopqrtuvwxyz" * 100
 
 print(f"test message: {len(tx)} bytes")
 
 n = len(tx)
-bps_expected = int(baud / 10.0)
+bps_expected = int( baud / 10 )
 errors = 0
 start = time.time()
 while True:
@@ -33,7 +33,9 @@ while True:
         start = end
         bps = int(n/dt)
 
-        if d != tx:
+        if len(d) != len(tx):
+            errors += 1
+        elif d != tx:
             errors += 1
     else:
         errors += 1
