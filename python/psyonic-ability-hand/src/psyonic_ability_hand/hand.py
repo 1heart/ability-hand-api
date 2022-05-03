@@ -121,15 +121,16 @@ class Finger:
 
 
 class Hand:
-    def __init__(self, comm: IO):
+    def __init__(self, comm: IO, slave_address=None):
         self._comm = comm
+        self._slave_address = slave_address
 
-    def checksum(self, d: array.array):
-        c = 0
-        for i in d:
-            c = (c + i) & 0xFF
-        c = (-c) & 0xFF
-        return c
+    def checksum(self, data:bytes):
+        cksum = 0
+        for d in data:
+            cksum = cksum + d
+        return (-cksum) & 0xFF
+
 
     def _txbuf(self) -> array.array:
         return array.array("B", [0] * 26)
@@ -207,6 +208,32 @@ class Hand:
             raise RcvError("checksum failed")
 
         return (jd, pressure, status)
+
+
+    def position_command(self, pos:JointData, variant:int=0x12) -> bytes:
+        buf = struct.pack('BB', self._slave_address, variant) 
+        for d in pos.to_list():
+            p = int(d * 32767 / 150)
+            buf += struct.pack('<H', p & 0xFFFF ) 
+
+        buf += struct.pack( 'B', self.checksum(buf) )
+
+        self._comm.write(buf)
+
+    def read(self):
+        p_type = self._comm.read():
+        p_len = 0
+
+        if (p_type & 0xF) == 2:
+            p_len = 38
+        else:
+            p_len = 71
+
+        p = self._comm.read(p_len)
+
+        
+
+
 
 
 class App:

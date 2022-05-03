@@ -10,8 +10,10 @@ baud = 460800
 print(f"opening port at {baud}")
 ser=serial.Serial("/dev/ttyS0", baud)
 
-tx=b"abcdefghijgklmnopqrtuvwxyz"
-tx = tx+tx+tx+tx
+tx=b"abcdefghijgklmnopqrtuvwxyz" * 20
+ 
+print(f"test message: {len(tx)} bytes")
+
 n = len(tx)
 bps_expected = int(baud / 10.0)
 errors = 0
