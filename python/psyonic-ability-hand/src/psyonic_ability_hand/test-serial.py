@@ -1,15 +1,24 @@
 
 from serial import Serial
+from typing import cast, IO
 from hand import Hand, JointData
-from io import SerialIO
+from io import SerialIO, IOBase
 
+port="/dev/ttyUSB0"
 baud=460800
 
 if __name__ == '__main__':
-	comm = Serial("/dev/ttyS0", baud)
+	comm = cast(IO, Serial(port, baud))
 
 	hand = Hand(comm, slave_address=0x50)
 
-	jd = JointData(0x01, 0x02, 0x03, 0x10, 0x20, 0x30)
+	jd = JointData(0, 0, 0, 0, 0, 0)
 
 	hand.position_command(jd)
+
+	(pos, cur, vel, status) = hand.read()
+
+	print(f"Pos:{pos}")
+	print(f"Current:{cur}")
+	print(f"Velocity:{vel}")
+	print(f"status:{status}")

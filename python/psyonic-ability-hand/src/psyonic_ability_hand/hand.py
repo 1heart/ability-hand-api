@@ -4,8 +4,9 @@ import dataclasses
 import struct
 import time
 from enum import Enum, IntEnum
-from typing import Any, IO, Protocol, List, Optional
+from typing import Any, IO, Protocol, List, Optional, Tuple
 from dataclasses import dataclass
+from uuid import RESERVED_FUTURE
 import numpy as np
 import evdev
 
@@ -49,7 +50,7 @@ Finger  | Index     | Middle    |  Ring     | Pinky     | ThumbF    | ThumbR
 ----
 I: s0    14.2 - 74.6
 M: s1
-R: 
+R:
 P:
 T1:
 T2:
@@ -210,28 +211,65 @@ class Hand:
         return (jd, pressure, status)
 
 
-    def position_command(self, pos:JointData, variant:int=0x12) -> bytes:
-        buf = struct.pack('BB', self._slave_address, variant) 
+    def position_command(self, pos:JointData, variant:int=0x12) -> None:
+        buf = struct.pack('BB', self._slave_address, variant)
         for d in pos.to_list():
             p = int(d * 32767 / 150)
-            buf += struct.pack('<H', p & 0xFFFF ) 
+            buf += struct.pack('<H', p & 0xFFFF )
 
         buf += struct.pack( 'B', self.checksum(buf) )
 
         self._comm.write(buf)
 
-    def read(self):
-        p_type = self._comm.read():
+    def read(self) -> Tuple[JointData, JointData, JointData,int]:
+        p_type = self._comm.read()
         p_len = 0
 
-        if (p_type & 0xF) == 2:
+        variant = p_type & 0xF
+
+        if variant == 2:
             p_len = 38
         else:
             p_len = 71
 
         p = self._comm.read(p_len)
 
-        
+        if p != p_len:
+            raise RcvError("invalid length")
+
+        chksum = p[-1]
+        data = [p_type] + p[:-1]
+
+        print(f"chksum: received: {chksum} expected: { self.checksum(data) }" )
+
+        if chksum != self.checksum(data):
+            raise RcvError("checksum failed")
+
+        if variant == 2:
+            return (JointData(), JointData(), JointData(), 0)
+        else:
+            i = 0
+
+            d = []
+            ofs = 0
+            for i in range(6):
+                d.append( struct.unpack('<HH', data[ofs:ofs+4]) )
+                ofs += 4
+
+
+            pos,cur = zip(*d)
+
+            vel = []
+            for i in range(6, 12):
+                vel.append( struct.unpack('<H', data[ofs:ofs+2] ) )
+                ofs += 2
+
+            status = data[-1]
+
+            return ( JointData(*pos), JointData(*cur), JointData(*vel), status )
+
+
+
 
 
 
@@ -342,7 +380,7 @@ if __name__ == "__main__":
 
                         if not pos_input:
                             pos_input = _position
-        
+
                         requested = dataclasses.asdict(pos_input)
 
                         # return { 'name' : position, ... }
@@ -362,7 +400,7 @@ if __name__ == "__main__":
 
                             table.add_row(finger, requested_col, position_col, pressure_col)
                     else:
-                        errors += 1    
+                        errors += 1
 
                     layout["errors"].update(f"Errors: {errors}")
                     layout['table'].update(table)
@@ -386,7 +424,7 @@ if __name__ == "__main__":
         try:
             fds = ([sys.stdin], [], [])
             ch = None
-            while app.RUN: 
+            while app.RUN:
                 if select.select(*fds, 0.010) == fds:
                     ch = sys.stdin.read(1)
                     app.loop.call_soon_threadsafe(app.q.put_nowait, ch)
@@ -410,9 +448,8 @@ if __name__ == "__main__":
     input_thread.start()
 
     try:
-        app.loop.run_until_complete(main(app))        
+        app.loop.run_until_complete(main(app))
     except (Exception,KeyboardInterrupt):
         app.RUN = False
         input_thread.join()
         print("exiting")
-        
