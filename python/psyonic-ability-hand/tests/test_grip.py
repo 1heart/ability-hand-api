@@ -3,10 +3,11 @@ import pytest
 import binascii
 import array
 
-from typing import IO
+from typing import Optional
 
 from psyonic_ability_hand import log
-from psyonic_ability_hand.hand import Hand, Grip, JointData, Mode, PressureData, checksum
+from psyonic_ability_hand.io import IOBase
+from psyonic_ability_hand.hand import Hand, Grip, checksum
 
 
 """
@@ -24,14 +25,14 @@ sensor 5 |            0332 |            0136 |            0062 |            0066
 
 """
 
-class MockComm(IO):
+class MockComm(IOBase):
     def open(self, *args, **kw):
         log.info("open")
         pass
 
-    def read(self, *args, **kw) -> int:
+    def read(self, *args, **kw) -> Optional[bytes]:
         log.info("read")
-        return 0
+        pass
 
     def write(self, data, *args, **kw) -> int:
         log.info(f"write {binascii.hexlify(data)}")

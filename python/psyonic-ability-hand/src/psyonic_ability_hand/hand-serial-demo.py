@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 
 from serial import Serial
 
+from rich.logging import RichHandler
 from rich.style import Style
 from rich.console import Console, Group
 from rich.columns import Columns
@@ -26,6 +27,8 @@ from psyonic_ability_hand.hand import (
     MockComm,
 )
 
+
+
 console = Console()
 
 class AppMode(IntEnum):
@@ -36,6 +39,7 @@ class AppMode(IntEnum):
 
 
 class App:
+    key_input = queue.Queue()
     run: bool = True
     position_input = JointData()
     position_input_init = False
@@ -83,56 +87,48 @@ def handle_key(app: App, key: str):
     if key == "m":
         app.mode = (app.mode + 1) % 4
     elif app.hand is not None:
-        if app.mode == AppMode.Position:
-            if update_joint_data(app.position_input, key):
-                app.hand.set_position(app.position_input)
-        elif app.mode == AppMode.Velocity:
-            if update_joint_data(app.velocity_input, key):
-                app.hand.set_velocity(app.velocity_input)
-        elif app.mode == AppMode.Torque:
-            if update_joint_data(app.torque_input, key):
-                app.hand.set_torque(app.torque_input)
-        elif app.mode == AppMode.Pwm:
-            if update_joint_data(app.pwm_input, key):
-                app.hand.set_torque(app.pwm_input)
+        try:
+            if app.mode == AppMode.Position:
+                if update_joint_data(app.position_input, key):
+                    app.hand.set_position(app.position_input)
+            elif app.mode == AppMode.Velocity:
+                if update_joint_data(app.velocity_input, key):
+                    app.hand.set_velocity(app.velocity_input)
+            elif app.mode == AppMode.Torque:
+                if update_joint_data(app.torque_input, key):
+                    app.hand.set_torque(app.torque_input)
+            elif app.mode == AppMode.Pwm:
+                if update_joint_data(app.pwm_input, key):
+                    app.hand.set_torque(app.pwm_input)
+        except Exception as e:
+            console.print(e)
+            raise e
+
+
+
+def get_input(app:App):
+    old_settings = termios.tcgetattr(sys.stdin)
+    tty.setcbreak(sys.stdin.fileno())
+    try:
+        fds = ([sys.stdin], [], [])
+        ch = None
+        while app.run:
+            if select.select(*fds, 0.020) == fds:
+                app.key_input.put_nowait( sys.stdin.read(1) )
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        app.run = False
 
 
 def main():
     app = App()
+    msgs = []
 
-    io = MockComm()
-    #    io = Serial("/dev/ttyUSB0")
-    app.hand = Hand(io)
-    app.hand.set_grip(Grip.Open)
+    layout = Layout(height=30)
 
-    def get_input():
-        old_settings = termios.tcgetattr(sys.stdin)
-        tty.setcbreak(sys.stdin.fileno())
-        try:
-            fds = ([sys.stdin], [], [])
-            ch = None
-            while app.run:
-                if select.select(*fds, 0.010) == fds:
-                    handle_key(app, sys.stdin.read(1))
-        except KeyboardInterrupt:
-            pass
-        finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-            app.run = False
-
-    input_thread = threading.Thread(target=get_input)
-    input_thread.start()
-
-    layout = Layout()
-
-    layout.split(
-        Layout(name="info", size=13),
-        Layout(name="stats", size=1),
-        Layout(name="table"),
-    )
-
-    layout["info"].update(
-        """Keys:
+    info="""Keys:
     Cycle Input Mode: 'm'
 
     Joint Control:
@@ -145,16 +141,41 @@ def main():
     | -10 |   Z   |  X   |   C    |   V   |    B     |     N     |
     --------------------------------------------------------------
 """
+
+    layout.split(
+        Layout(info, name="info", size=13),
+        Layout(" ", name="stats", size=1),
+        Layout(" ", name="table", size=10),
+        Layout(" ", name="log")
     )
-    layout["stats"].update("")
+
+    def update_log(msg):
+        nonlocal msgs
+        msgs = msgs[-9:] + [msg]
+        layout['log'].update(Text(''.join( msgs ) ))
+
+    log.configure(handlers=[])
+    log.add('hand-serial-demo.log')
+    log.add( update_log, colorize=True )
+
+    io = MockComm()
+    #    io = Serial("/dev/ttyUSB0")
+    app.hand = Hand(io, on_error=lambda msg: update_log(msg + '\n'))
+    app.hand.set_grip(Grip.Open)
+
+    input_thread = threading.Thread(target=get_input, args=(app,))
+    input_thread.start()
 
     active_column = Style(color="cyan")
 
     try:
         app.hand.start()
 
-        with Live(layout, console=console, auto_refresh=False, screen=True) as live:
+        with Live(layout, console=console, auto_refresh=False, screen=False) as live:
             while app.run:
+                while (not app.key_input.empty()) and (key:=app.key_input.get_nowait()) is not None:
+                    handle_key(app, key)
+
                 table = Table(padding=(0, 1))
                 table.add_column("Item")
                 table.add_column(
@@ -171,31 +192,33 @@ def main():
                 table.add_column(
                     "PWM", header_style=(active_column if app.mode == 3 else None)
                 )
-                table.add_column("Pressures")
+                table.add_column("Touch Sensors")
 
                 if not app.position_input_init:
                     app.position_input = app.hand.position
 
                 requested = app.position_input.to_dict()
                 position = app.hand.position.to_dict()
-                pressure = app.hand.touch.to_dict()
+                touch = app.hand.touch.to_dict()
                 velocity_input = app.velocity_input.to_dict()
                 torque_input = app.torque_input.to_dict()
                 pwm_input = app.pwm_input.to_dict()
 
                 for finger in position:
-                    pres = pressure.get(finger)
+                    touch_sensors = touch.get(finger)
 
+                    position_request = f'{requested[finger]:5.2f}'
+                    position_actual = f'{position[finger]:5.2f}'
                     position_col = (
-                        f"{requested[finger]:> 12.6f} | {position[finger]:< 12.6f}"
+                        f"{position_request: ^8}|{position_actual: ^10}"
                     )
-                    velocity_col = f"{velocity_input[finger]}"
-                    torque_col = f"{torque_input[finger]}"
-                    pwm_col = f"{pwm_input[finger]}"
-                    pressure_col = ""
-                    if pres:
-                        pressure_col = Columns(
-                            [f"{p:> 12.3f}" for p in pres.values()], equal=True
+                    velocity_col = f"{velocity_input[finger]: ^10}"
+                    torque_col = f"{torque_input[finger]: ^10}"
+                    pwm_col = f"{pwm_input[finger]: ^10}"
+                    touch_col = ""
+                    if touch_sensors:
+                        touch_col = Columns(
+                            [f"{p:> 12.3f}" for p in touch_sensors], equal=True
                         )
 
                     table.add_row(
@@ -204,7 +227,7 @@ def main():
                         velocity_col,
                         torque_col,
                         pwm_col,
-                        pressure_col,
+                        touch_col,
                     )
 
                 layout["table"].update(table)
@@ -214,7 +237,8 @@ def main():
                         f"Baud: RX[{st.rx_baud:> 10d}]  TX[{st.tx_baud:> 10d}]  Packets: RX[{st.rx_packets}] TX[{st.tx_packets}]"
                     )
                 )
-                live.update(layout, refresh=True)
+                live.refresh()
+#                live.update(layout, refresh=True)
                 time.sleep(0.030)
 
             app.run = False
@@ -222,12 +246,12 @@ def main():
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        log.exception("error")
+        pass
     finally:
+        print("Shutting down")
         app.hand.stop()
 
     app.run = False
-    console.print("waiting on input thread")
     input_thread.join()
 
 

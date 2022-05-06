@@ -6,8 +6,6 @@ from queue import Queue
 from threading import Thread
 
 
-
-
 class IOBase:
     def read(self, len: int) -> Optional[bytes]:
         pass
