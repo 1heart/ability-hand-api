@@ -4,9 +4,10 @@ import dataclasses
 import sys, termios, tty, select
 import threading, queue
 
-from typing import cast, IO
+from typing import cast
 
 from serial import Serial
+
 
 from rich.style import Style
 from rich.console import Console, Group
@@ -20,7 +21,7 @@ from rich.layout import Layout
 from decimal import *
 from loguru import logger as log
 
-from psyonic_ability_hand.hand import Hand, ProtocolError, JointData, Grip, MockHandComm, ReplyType
+from psyonic_ability_hand.hand import Hand, ProtocolError, JointData, Grip, MockComm, ReplyType
 
 
 class App:
@@ -36,10 +37,9 @@ async def display(app):
 
     console = Console()
 
-    log.info("creating I2C connection to hand")
-    io = MockHandComm()
+    io = MockComm()
 #    io = Serial("/dev/ttyUSB0")
-    hand = Hand(cast(IO, io))
+    hand = Hand(io)
 
     # log.info("setting grip open")
     hand.set_grip(Grip.Open)
@@ -77,6 +77,9 @@ async def display(app):
     active_column = Style(color='cyan')
 
     try:
+
+        hand.start()
+
         with Live(layout, auto_refresh=False, screen=True) as live:
             while app.RUN and (t := time.time() - start):  # < 100:
                 data = None
@@ -116,10 +119,7 @@ async def display(app):
                             )
 
                     log.debug(f"sending position update: {pos_input}")
-                    hand.position_command(ReplyType.PositionCurrentTouch, pos_input)
-                else:
-                    log.debug("querying position")
-                    hand.query_command(ReplyType.PositionCurrentTouch)
+                    hand.set_position(pos_input)
 
                 table = Table(padding=(0, 1))
                 table.add_column("Item")
@@ -129,57 +129,36 @@ async def display(app):
                 table.add_column("PWM", header_style=(active_column if mode==3 else None))
                 table.add_column("Pressures")
 
-                resp = None
-                try:
-                    resp = hand.read()
-                except ProtocolError as e:
-                    log.error(f"communication error: {e}")
-                    errors += 1
+                if not pos_input:
+                    log.info(f"updating position input to {hand.position}")
+                    pos_input = hand.position
 
-                if resp is not None:
-                    position = cast(JointData, resp.get('position'))
-                    velocity = cast(JointData, resp.get('velocity'))
-                    touch = resp.get('touch')
-                    status = resp.get('status')
+                requested = dataclasses.asdict(pos_input)
+                position = dataclasses.asdict(hand.position)
+                pressure = dataclasses.asdict(hand.touch)
+                velocity = dataclasses.asdict(hand.velocity)
 
-                    #log.debug(f"received position {position}")
+                for finger in position:
+                    pres = pressure.get(finger)
 
-                    if None in (position, touch, status):
-                        log.error("missing data element")
-                        continue
+                    position_col = f"{requested[finger]:> 12.6f} | {position[finger]:> 12.6f}"
 
-                    if not pos_input:
-                        log.info(f"updating position input to {position}")
-                        pos_input = position
+                    velocity_col = ''
+                    torque_col = ''
+                    pwm_col = ''
 
-                    log.debug(f"position {position}")
-
-                    requested = dataclasses.asdict(pos_input)
-                    position = dataclasses.asdict(position)
-                    pressure = dataclasses.asdict(touch)
-                    velocity = dataclasses.asdict(velocity)
-
-                    for finger in position:
-                        pres = pressure.get(finger)
-
-                        position_col = f"{requested[finger]:> 12.6f} | {position[finger]:> 12.6f}"
-
-                        velocity_col = ''
-                        torque_col = ''
-                        pwm_col = ''
-
-                        pressure_col = ""
-                        if pres:
-                            pressure_col = Columns(
-                                [f"{p:> 12.3f}" for p in pres.values()], equal=True
-                            )
-
-                        table.add_row(
-                            finger, position_col, velocity_col, torque_col, pwm_col, pressure_col
+                    pressure_col = ""
+                    if pres:
+                        pressure_col = Columns(
+                            [f"{p:> 12.3f}" for p in pres.values()], equal=True
                         )
-                else:
-                    errors += 1
-                    layout["errors"].update(f"Errors: {errors}")
+
+                    table.add_row(
+                        finger, position_col, velocity_col, torque_col, pwm_col, pressure_col
+                    )
+            # else:
+            #     errors += 1
+            #     layout["errors"].update(f"Errors: {errors}")
 
                 layout["table"].update(table)
                 live.update(layout, refresh=True) # screen.update(layout, refresh=True)
