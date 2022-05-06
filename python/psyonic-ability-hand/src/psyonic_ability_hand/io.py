@@ -2,9 +2,10 @@ import os
 from typing import Optional
 from smbus2.smbus2 import SMBus, i2c_msg
 from serial import Serial
-from loguru import logger as log
 from queue import Queue
 from threading import Thread
+
+
 
 
 class IOBase:

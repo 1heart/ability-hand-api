@@ -1,8 +1,8 @@
 import time
 
+from psyonic_ability_hand import log
 from psyonic_ability_hand.hand import Hand, MockComm
 
-from loguru import logger as log
 
 def main():
     log.info("starting mt test")

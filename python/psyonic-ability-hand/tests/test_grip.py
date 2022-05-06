@@ -1,11 +1,12 @@
 from unittest import expectedFailure
-from psyonic_ability_hand.hand import Hand, Grip, JointData, Mode, PressureData, checksum
 import pytest
 import binascii
 import array
 
 from typing import IO
-from loguru import logger as log
+
+from psyonic_ability_hand import log
+from psyonic_ability_hand.hand import Hand, Grip, JointData, Mode, PressureData, checksum
 
 
 """

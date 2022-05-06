@@ -12,8 +12,8 @@ import numpy as np
 import binascii
 import queue
 from .io import IOBase
-from loguru import logger as log
 
+from psyonic_ability_hand import log
 
 # time in seconds to wait before triggering a query in case of packet drops
 STALL_TIMEOUT = 0.250
@@ -52,6 +52,9 @@ class JointData:
     Pinky: float = 0
     ThumbFlexor: float = 0
     ThumbRotator: float = 0
+
+    def to_dict(self):
+        return dataclasses.asdict(self)
 
     def to_list(self):
         return dataclasses.astuple(self)
@@ -97,6 +100,10 @@ class PressureData:
     Ring: FingerPressure = FingerPressure()
     Pinky: FingerPressure = FingerPressure()
     ThumbFlexor: FingerPressure = FingerPressure()
+
+    def to_dict(self):
+        return dataclasses.asdict(self)
+
 
     @staticmethod
     def unpack(data):
@@ -246,8 +253,7 @@ class Hand:
         self.current = JointData()
         self.velocity = JointData()
         self.touch = PressureData()
-
-
+        self.motor_status = MotorHotStatus()
 
     def _tx(self):
         log.debug("tx thread starting")
@@ -266,22 +272,27 @@ class Hand:
                     if timed_out := not self._tx_cond.wait(STALL_TIMEOUT):
                         break
 
-            if pos_updated():
-                self.position_command(replyType, self._pos_data)
-                self._pos_update_prev = self._pos_update
-            elif torque_updated():
-                self.torque_command(replyType, self._torque_data)
-                self._torque_update_prev = self._torque_update
-            elif velocity_updated():
-                self.velocity_command(replyType, self._velocity_data)
-                self._velocity_update_prev = self._velocity_update
-            elif pwm_updated():
-                self.pwm_command(replyType, self._pwm_data)
-                self._pwm_update_prev = self._pwm_update
-            elif rx_ready() or timed_out:
-                if timed_out and self._run:
-                    log.warning("pipeline restarted due to stall")
-                self.query_command(replyType)
+            try:
+                if pos_updated():
+                    self.position_command(replyType, self._pos_data)
+                    self._pos_update_prev = self._pos_update
+                elif torque_updated():
+                    self.torque_command(replyType, self._torque_data)
+                    self._torque_update_prev = self._torque_update
+                elif velocity_updated():
+                    self.velocity_command(replyType, self._velocity_data)
+                    self._velocity_update_prev = self._velocity_update
+                elif pwm_updated():
+                    self.pwm_command(replyType, self._pwm_data)
+                    self._pwm_update_prev = self._pwm_update
+                elif rx_ready() or timed_out:
+                    if timed_out and self._run:
+                        log.warning("tx forced restart due to stall")
+                        self._tx_packets = self._rx_packets
+                    self.query_command(replyType)
+            except Exception as e:
+                log.exception("tx error")
+                self._run = False
 
         log.debug("tx thread ending")
 
@@ -291,12 +302,15 @@ class Hand:
 
     def _rx(self):
         log.debug("rx thread starting")
-
         while self._run:
             try:
                 update = self.read()
             except ProtocolError:
                 log.exception("protocol error")
+                self._run = False
+            except Exception as e:
+                log.exception("unknown error")
+                self._run = False
 
         log.debug("rx thread ending")
 
@@ -429,8 +443,10 @@ class Hand:
         """
 
         def scale(t):
+            LIMIT = 3.6
+            t = -LIMIT if t < -LIMIT else LIMIT if t > LIMIT else t
             kt = 1.49  # nNM per Amp
-            return int(t / kt * 7000 / 0.540) & 0xFFFF
+            return int(t / kt * 7000 / 0.540)
 
         data = struct.pack("<6h", *[scale(t) for t in torque.to_list()])
         self._command(0x30 | replyType, data)
@@ -444,11 +460,10 @@ class Hand:
         """
         JointData should specify a PWM range or -100% to 100% for each joint
         """
-
         def scale(t):
             LIMIT = 3546
             t = -LIMIT if t < -LIMIT else LIMIT if t > LIMIT else t
-            return int(t / 100 * LIMIT) & 0xFFFF
+            return int(t / 100 * LIMIT)
 
         data = struct.pack("<6h", *[scale(t) for t in pwm.to_list()])
         self._command(0x40 | replyType, data)
@@ -463,6 +478,7 @@ class Hand:
     ) -> Optional[Dict[str, Union[JointData, PressureData, MotorHotStatus]]]:
         p_type = self._comm.read(1)
 
+        # trigger TX thread as soon as first bytes detected
         with self._tx_cond:
             self._rx_bytes += 1
             self._rx_packets += 1
@@ -509,8 +525,7 @@ class Hand:
         # variant 1: [ (position, rotor velocity), ... ] | [ touch sensor, ... ] | hot/cold status
         # variant 2: [ (position, motor current), ... ] | [ rotor velocity, ... ] | hot/cold status
 
-        #status = MotorHotStatus()
-        #touch = PressureData()
+        self.motor_status = MotorHotStatus.unpack(data[-1])
 
         # each finger: [position,current,..] or [position,velocity,...]
         d = struct.unpack("<12h", data[:24])
@@ -535,13 +550,6 @@ class Hand:
         else:
             raise ProtocolError(f"Unsupported reply variant; {variant}")
 
-        # return {
-        #     "position": JointData(*pos),
-        #     "current": JointData(*cur),
-        #     "velocity": JointData(*vel),
-        #     "touch": touch,
-        #     "status": MotorHotStatus.unpack(data[-1]),
-        # }
 
     def grasp(self, *, width, velocity=None, force=None):
         pass

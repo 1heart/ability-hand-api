@@ -1,13 +1,11 @@
-import asyncio
 import time
 import dataclasses
 import sys, termios, tty, select
 import threading, queue
-
-from typing import cast
+from enum import IntEnum
+from typing import Optional, Tuple
 
 from serial import Serial
-
 
 from rich.style import Style
 from rich.console import Console, Group
@@ -19,134 +17,181 @@ from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.layout import Layout
 from decimal import *
-from loguru import logger as log
 
-from psyonic_ability_hand.hand import Hand, ProtocolError, JointData, Grip, MockComm, ReplyType
+from psyonic_ability_hand import log
+from psyonic_ability_hand.hand import (
+    Hand,
+    JointData,
+    Grip,
+    MockComm,
+)
+
+console = Console()
+
+class AppMode(IntEnum):
+    Position = 0
+    Velocity = 1
+    Torque = 2
+    Pwm = 3
 
 
 class App:
-    RUN:bool = True
-    q: asyncio.Queue
-    loop: asyncio.AbstractEventLoop
-    position: JointData
-    velocity: JointData
-    initialized: bool
+    run: bool = True
+    position_input = JointData()
+    position_input_init = False
+    velocity_input = JointData(50, 50, 50, 50, 50, 50)
+    torque_input = JointData()
+    pwm_input = JointData()
+    initialized: bool = False
+    mode: int = 0
+    hand: Optional[Hand] = None
 
-async def display(app):
-    mode = 0
 
-    console = Console()
+PINKY_KEYS = ("A", "a", "z", "Z")
+RING_KEYS = ("S", "s", "x", "X")
+MIDDLE_KEYS = ("D", "d", "c", "C")
+INDEX_KEYS = ("F", "f", "v", "V")
+THUMB_FLEXOR_KEYS = ("G", "g", "b", "B")
+THUMB_ROTATOR_KEYS = ("H", "h", "n", "N")
+KEY_VALUE_MAP = (-10, -1, 1, 10)
+
+
+def handle_key(app: App, key: str):
+    if key == "q":
+        raise KeyboardInterrupt
+
+    def update_joint_data(joint, key):
+        if key in PINKY_KEYS:
+            joint.Pinky += KEY_VALUE_MAP[PINKY_KEYS.index(key)]
+            return True
+        if key in RING_KEYS:
+            joint.Ring += KEY_VALUE_MAP[RING_KEYS.index(key)]
+            return True
+        if key in MIDDLE_KEYS:
+            joint.Middle += KEY_VALUE_MAP[MIDDLE_KEYS.index(key)]
+            return True
+        if key in INDEX_KEYS:
+            joint.Index += KEY_VALUE_MAP[INDEX_KEYS.index(key)]
+            return True
+        if key in THUMB_FLEXOR_KEYS:
+            joint.ThumbFlexor += KEY_VALUE_MAP[THUMB_FLEXOR_KEYS.index(key)]
+            return True
+        if key in THUMB_ROTATOR_KEYS:
+            joint.ThumbRotator += KEY_VALUE_MAP[THUMB_ROTATOR_KEYS.index(key)]
+            return True
+
+    if key == "m":
+        app.mode = (app.mode + 1) % 4
+    elif app.hand is not None:
+        if app.mode == AppMode.Position:
+            if update_joint_data(app.position_input, key):
+                app.hand.set_position(app.position_input)
+        elif app.mode == AppMode.Velocity:
+            if update_joint_data(app.velocity_input, key):
+                app.hand.set_velocity(app.velocity_input)
+        elif app.mode == AppMode.Torque:
+            if update_joint_data(app.torque_input, key):
+                app.hand.set_torque(app.torque_input)
+        elif app.mode == AppMode.Pwm:
+            if update_joint_data(app.pwm_input, key):
+                app.hand.set_torque(app.pwm_input)
+
+
+def main():
+    app = App()
 
     io = MockComm()
-#    io = Serial("/dev/ttyUSB0")
-    hand = Hand(io)
+    #    io = Serial("/dev/ttyUSB0")
+    app.hand = Hand(io)
+    app.hand.set_grip(Grip.Open)
 
-    # log.info("setting grip open")
-    hand.set_grip(Grip.Open)
-    # time.sleep(6.0)
-    # log.info("setting grip closed")
-    # hand.set_grip(Grip.Handshake)
-    # time.sleep(6.0)
-    # log.info("setting grip pinched")
-    # hand.set_grip(Grip.PinchGrasp)
-    # time.sleep(6.0)
+    def get_input():
+        old_settings = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+        try:
+            fds = ([sys.stdin], [], [])
+            ch = None
+            while app.run:
+                if select.select(*fds, 0.010) == fds:
+                    handle_key(app, sys.stdin.read(1))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+            app.run = False
 
-    start = time.time()
-    errors = 0
-    mode = 0
+    input_thread = threading.Thread(target=get_input)
+    input_thread.start()
 
     layout = Layout()
 
     layout.split(
-        Layout(name="info", size=2),
-        Layout(name="header", size=1),
-        Layout(name="errors", size=1),
+        Layout(name="info", size=13),
+        Layout(name="stats", size=1),
         Layout(name="table"),
     )
 
-    pos_input = None
-    torque_input = JointData()
-    velocity_input = JointData(50, 50, 50, 50, 50, 50)
-
     layout["info"].update(
-        "Move fingers with a,z | s,x | d,c | f,v | gb, hn. Change mode with 'm'. "
-    )
-    layout["header"].update("")
-    layout["errors"].update("")
+        """Keys:
+    Cycle Input Mode: 'm'
 
-    active_column = Style(color='cyan')
+    Joint Control:
+    --------------------------------------------------------------
+    |     | Pinky | Ring | Middle | Index | Thumb Fl | Thumb Rot |
+    |-----|-------|------|--------|-------|----------|-----------|
+    | +10 |   A   |  S   |   D    |   F   |    G     |     H     |
+    | +1  |   a   |  s   |   d    |   f   |    g     |     h     |
+    | -1  |   z   |  x   |   c    |   v   |    b     |     n     |
+    | -10 |   Z   |  X   |   C    |   V   |    B     |     N     |
+    --------------------------------------------------------------
+"""
+    )
+    layout["stats"].update("")
+
+    active_column = Style(color="cyan")
 
     try:
+        app.hand.start()
 
-        hand.start()
-
-        with Live(layout, auto_refresh=False, screen=True) as live:
-            while app.RUN and (t := time.time() - start):  # < 100:
-                data = None
-
-                if not app.q.empty():
-                    while not app.q.empty():
-                        key = app.q.get_nowait()
-
-                        if not pos_input:
-                            break
-
-                        def update_joint_data(val, keys):
-                            if key is not None and key in keys:
-                                val += -1 if key == keys[0] else 1
-                            return val
-
-                        if key == "m":
-                            mode = (mode + 1) % 4
-                        elif pos_input:
-                            pos_input.Pinky = update_joint_data(
-                                pos_input.Pinky, ["a", "z"]
-                            )
-                            pos_input.Ring = update_joint_data(
-                                pos_input.Ring, ["s", "x"]
-                            )
-                            pos_input.Middle = update_joint_data(
-                                pos_input.Middle, ["d", "c"]
-                            )
-                            pos_input.Index = update_joint_data(
-                                pos_input.Index, ["f", "v"]
-                            )
-                            pos_input.ThumbFlexor = update_joint_data(
-                                pos_input.ThumbFlexor, ["g", "b"]
-                            )
-                            pos_input.ThumbRotator = update_joint_data(
-                                pos_input.ThumbRotator, ["h", "n"]
-                            )
-
-                    log.debug(f"sending position update: {pos_input}")
-                    hand.set_position(pos_input)
-
+        with Live(layout, console=console, auto_refresh=False, screen=True) as live:
+            while app.run:
                 table = Table(padding=(0, 1))
                 table.add_column("Item")
-                table.add_column("Position", header_style=(active_column if mode==0 else None) )
-                table.add_column("Velocity", header_style=(active_column if mode==1 else None) )
-                table.add_column("Torque", header_style=(active_column if mode==2 else None))
-                table.add_column("PWM", header_style=(active_column if mode==3 else None))
+                table.add_column(
+                    "Position",
+                    header_style=(active_column if app.mode == 0 else None),
+                    justify="center",
+                )
+                table.add_column(
+                    "Velocity", header_style=(active_column if app.mode == 1 else None)
+                )
+                table.add_column(
+                    "Torque", header_style=(active_column if app.mode == 2 else None)
+                )
+                table.add_column(
+                    "PWM", header_style=(active_column if app.mode == 3 else None)
+                )
                 table.add_column("Pressures")
 
-                if not pos_input:
-                    log.info(f"updating position input to {hand.position}")
-                    pos_input = hand.position
+                if not app.position_input_init:
+                    app.position_input = app.hand.position
 
-                requested = dataclasses.asdict(pos_input)
-                position = dataclasses.asdict(hand.position)
-                pressure = dataclasses.asdict(hand.touch)
-                velocity = dataclasses.asdict(hand.velocity)
+                requested = app.position_input.to_dict()
+                position = app.hand.position.to_dict()
+                pressure = app.hand.touch.to_dict()
+                velocity_input = app.velocity_input.to_dict()
+                torque_input = app.torque_input.to_dict()
+                pwm_input = app.pwm_input.to_dict()
 
                 for finger in position:
                     pres = pressure.get(finger)
 
-                    position_col = f"{requested[finger]:> 12.6f} | {position[finger]:> 12.6f}"
-
-                    velocity_col = ''
-                    torque_col = ''
-                    pwm_col = ''
-
+                    position_col = (
+                        f"{requested[finger]:> 12.6f} | {position[finger]:< 12.6f}"
+                    )
+                    velocity_col = f"{velocity_input[finger]}"
+                    torque_col = f"{torque_input[finger]}"
+                    pwm_col = f"{pwm_input[finger]}"
                     pressure_col = ""
                     if pres:
                         pressure_col = Columns(
@@ -154,54 +199,37 @@ async def display(app):
                         )
 
                     table.add_row(
-                        finger, position_col, velocity_col, torque_col, pwm_col, pressure_col
+                        finger,
+                        position_col,
+                        velocity_col,
+                        torque_col,
+                        pwm_col,
+                        pressure_col,
                     )
-            # else:
-            #     errors += 1
-            #     layout["errors"].update(f"Errors: {errors}")
 
                 layout["table"].update(table)
-                live.update(layout, refresh=True) # screen.update(layout, refresh=True)
-                await asyncio.sleep(0.030)
+                st = app.hand.stats()
+                layout["stats"].update(
+                    Text(
+                        f"Baud: RX[{st.rx_baud:> 10d}]  TX[{st.tx_baud:> 10d}]  Packets: RX[{st.rx_packets}] TX[{st.tx_packets}]"
+                    )
+                )
+                live.update(layout, refresh=True)
+                time.sleep(0.030)
 
-            app.RUN = False
+            app.run = False
 
+    except KeyboardInterrupt:
+        pass
     except Exception as e:
         log.exception("error")
     finally:
-        pass
-        # termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        app.hand.stop()
 
-def get_input(app):
-    old_settings = termios.tcgetattr(sys.stdin)
-    tty.setcbreak(sys.stdin.fileno())
-    try:
-        fds = ([sys.stdin], [], [])
-        ch = None
-        while app.RUN:
-            if select.select(*fds, 0.010) == fds:
-                ch = sys.stdin.read(1)
-                app.loop.call_soon_threadsafe(app.q.put_nowait, ch)
-    finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-        app.RUN = False
-
-async def main(app):
-    await display(app)
-
-app = App()
-app.q = asyncio.Queue()
-app.loop = asyncio.get_event_loop()
-app.position = JointData()
-app.velocity = JointData()
-app.initialized = False
-
-input_thread = threading.Thread(target=get_input, args=(app,))
-input_thread.start()
-
-try:
-    app.loop.run_until_complete(main(app))
-except (Exception, KeyboardInterrupt):
-    app.RUN = False
+    app.run = False
+    console.print("waiting on input thread")
     input_thread.join()
-    print("exiting")
+
+
+if __name__ == "__main__":
+    main()
