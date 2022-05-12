@@ -253,7 +253,7 @@ def plot_lines(baud, bufWidth):
 			
 	if setupSerial(baud):
 		printInstructions()
-		plot_floats(6, bufWidth, serialComm)
+		plot_floats(6, bufWidth, serialComm, (0,30), (0,90), title="Ability Hand Finger Positions", xlabel="Time(s)", ylabel="Finger Angle (degrees)")
 		ser.close()		
 		print("Completed with " + str(reset_count) + " serial device resets")
 		print("Total Runs: " + str(total_count))
@@ -270,8 +270,6 @@ if __name__ == "__main__":
 			
 	print("Baud Rate: " + str(baud))
 	print("Buffer Width: " + str(width))
-	
-	time.sleep(1)
 	
 	plot_lines(baud, width)  
 
