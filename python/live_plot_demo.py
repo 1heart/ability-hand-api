@@ -231,11 +231,11 @@ def serialComm():
 					if replyLen == 71:
 						## Extract Data two at a time
 						for i in range(0, 15):
-							dualData = data[(i*3)+25:((i+1)*3)+25]
-							data1 = struct.unpack('H', dualData[0:2])[0] & 0x0FFF
-							data2 = (struct.unpack('H', dualData[1:3])[0] & 0xFFF0) >> 4
-							touchRead[i*2] = data1
-							touchRead[(i*2)+1] = data2
+							dualData = data[(i*3)+24:((i+1)*3)+24]
+							data1 = struct.unpack('<H', dualData[0:2])[0] & 0x0FFF
+							data2 = (struct.unpack('<H', dualData[1:3])[0] & 0xFFF0) >> 4
+							touchRead[i*2] = int(data1)
+							touchRead[(i*2)+1] = int(data2)
 							if data1 > 4096 or data2 > 4096:
 								needReset = True
 			else:
