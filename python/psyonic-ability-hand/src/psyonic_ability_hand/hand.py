@@ -197,7 +197,7 @@ class MockComm(IOBase):
             chk = checksum(resp)
             resp += chk.to_bytes(1, "little")
 
-            # time.sleep(.002)
+            time.sleep(.002)
 
             with self._cond:
                 self._reply += resp
@@ -453,7 +453,7 @@ class Hand:
         self._reply_type_prev = ReplyType(command & 0x3)
 
         buf += struct.pack("B", checksum(buf))
-        # log.debug(f"sending command:{command:X}  data:{HEX(data)} : buf:{HEX(buf)}")
+        log.debug(f"TX:{HEX(buf)}")
         self._comm.write(buf)
 
         self._tx_bytes += len(buf)
@@ -568,15 +568,22 @@ class Hand:
 
             p = self._comm.read(p_len)
 
+            log.debug(f"RX: {HEX(p)}")
+
             if p is None or len(p) != p_len:
                 raise ProtocolError("invalid length")
         else:
             p_len = 39 if self._reply_type_prev==ReplyType.PositionCurrentVelocity else 72
             p = self._comm.read(p_len)
+            log.debug(f"RX@{len(p)}: {HEX(p)}")
             if p is None or len(p) != p_len:
                 raise ProtocolError("invalid length")
             p_type = bytes(p[0])
             variant = p[0] & 0xF
+            with self._tx_cond:
+                self._rx_bytes += 1
+                self._rx_packets += 1
+                self._tx_cond.notify()
 
 
         self._rx_bytes += len(p)
@@ -586,6 +593,8 @@ class Hand:
         data = p[:-1]
         # reassemble header for checksum calc
         p = p_type + data
+
+        log.debug(f"calculated checksum: {p_sum:x}")        
 
         if p_sum != checksum(p):
             raise ProtocolError(

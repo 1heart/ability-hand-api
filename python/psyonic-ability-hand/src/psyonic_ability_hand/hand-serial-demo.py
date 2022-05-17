@@ -27,7 +27,7 @@ from psyonic_ability_hand.hand import (
     MockComm,
 )
 
-
+from psyonic_ability_hand.io import I2CIO, SerialIO
 
 console = Console()
 
@@ -113,7 +113,7 @@ def get_input(app:App):
         fds = ([sys.stdin], [], [])
         ch = None
         while app.run:
-            if select.select(*fds, 0.020) == fds:
+            if select.select(*fds, 0.050) == fds:
                 app.key_input.put_nowait( sys.stdin.read(1) )
     except KeyboardInterrupt:
         pass
@@ -122,7 +122,7 @@ def get_input(app:App):
         app.run = False
 
 
-def main():
+def main(comm_type):
     app = App()
     msgs = []
 
@@ -158,8 +158,13 @@ def main():
     log.add('hand-serial-demo.log')
     log.add( update_log, colorize=True )
 
-    io = MockComm()
-    #    io = Serial("/dev/ttyUSB0")
+    if comm_type=='mock':
+        io = MockComm()
+    elif comm_type == 'serial':
+        raise Exception("not implemented")
+    elif comm_type == 'i2c':
+        io = I2CIO()
+
     app.hand = Hand(io, on_error=lambda msg: update_log(msg + '\n'))
     app.hand.set_grip(Grip.Open)
 
@@ -239,7 +244,7 @@ def main():
                 )
                 live.refresh()
 #                live.update(layout, refresh=True)
-                time.sleep(0.030)
+                time.sleep(0.100)
 
             app.run = False
 
@@ -256,4 +261,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-c', '--comm', help="'i2c' or 'serial', 'mock', default: serial", default="i2c")
+
+    args = parser.parse_args()
+
+    main(args.comm)

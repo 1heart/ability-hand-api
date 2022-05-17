@@ -2,8 +2,9 @@ import os
 from typing import Optional
 from smbus2.smbus2 import SMBus, i2c_msg
 from serial import Serial
-from queue import Queue
-from threading import Thread
+import threading
+from enum import IntEnum
+
 
 
 class IOBase:
@@ -13,21 +14,29 @@ class IOBase:
     def write(self, data: bytes) -> int:
         return 0
 
+    def get_async(self):
+        return False
+
+    is_async = property(get_async)
+
+
 class I2CIO(IOBase):
     def __init__(self, bus_number=1, addr=0x50):
         self.bus = SMBus(bus_number, force=True)
         self.addr = addr
+        self.lock = threading.Lock()
 
     def read(self, len: int):
-
-        msg = i2c_msg.read(self.addr, len)
-        self.bus.i2c_rdwr(msg)
-        return bytes(list(msg))
+        with self.lock:
+            msg = i2c_msg.read(self.addr, len)
+            self.bus.i2c_rdwr(msg)
+            return bytes(list(msg))
 
     def write(self, data: bytes):
-        msg = i2c_msg.write(self.addr, data)
-        self.bus.i2c_rdwr(msg)
-        return len(data)
+        with self.lock:
+            msg = i2c_msg.write(self.addr, data)
+            self.bus.i2c_rdwr(msg)
+            return len(data)
 
     def __str__(self):
         return f'I2C[{self.bus}]@0x{self.addr:x}'
@@ -44,3 +53,6 @@ class SerialIO(IOBase):
 
     def __str__(self):
         return f'{self.bus}'
+
+    def get_async(self):
+        return True
