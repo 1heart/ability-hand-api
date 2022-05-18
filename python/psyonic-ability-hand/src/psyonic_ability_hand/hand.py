@@ -238,6 +238,20 @@ class HandThread(threading.Thread):
         self.exception = None
         self.hand = hand
 
+class HandV1Thread(HandThread):
+    def run(self):
+        hand = self.hand
+
+        hand.set_v1_mode(V1_POS_UPDATE)
+        while hand._run:
+            try:
+                hand._command( V1_POS_UPDATE, struct.pack('<6f', *hand._pos_input.to_list() ) )
+                hand.read_v1()
+                time.sleep(0.030)
+            except Exception as e:
+                hand._on_error(f"v1 error: {e}")
+                self.exception = e 
+                hand._run = False
 
 class HandTxThread(HandThread):
     def run(self):
@@ -266,16 +280,16 @@ class HandTxThread(HandThread):
 
             try:
                 if pos_updated():
-                    hand.position_command(replyType, hand._pos_data)
+                    hand.position_command(replyType, hand._pos_input)
                     hand._pos_update_prev = hand._pos_update
                 elif torque_updated():
-                    hand.torque_command(replyType, hand._torque_data)
+                    hand.torque_command(replyType, hand._torque_input)
                     hand._torque_update_prev = hand._torque_update
                 elif velocity_updated():
-                    hand.velocity_command(replyType, hand._velocity_data)
+                    hand.velocity_command(replyType, hand._velocity_input)
                     hand._velocity_update_prev = hand._velocity_update
                 elif pwm_updated():
-                    hand.pwm_command(replyType, hand._pwm_data)
+                    hand.pwm_command(replyType, hand._pwm_input)
                     hand._pwm_update_prev = hand._pwm_update
                 elif rx_ready():
                     hand.query_command(replyType)
@@ -295,12 +309,7 @@ class HandRxThread(HandThread):
         log.debug("rx thread starting")
         while hand._run:
             try:
-                if hand.is_v1():
-                    hand.read_v1()
-                   # V1/I2C will always immediately return with data
-                    time.sleep(0.030)
-                else:
-                    hand.read_v2()
+                hand.read_v2()
             except Exception as e:
                 hand._on_error(f"RX error: {e}")
                 hand._run = False
@@ -320,6 +329,7 @@ class Hand:
         self._slave_address = slave_address
         self._on_error = on_error or (lambda msg: log.error(msg))
         self._run = True
+        self._v1_thread = HandV1Thread(self)
         self._tx_thread = HandTxThread(self)
         self._tx_packets = 0
         self._tx_bytes = 0
@@ -328,16 +338,16 @@ class Hand:
         self._rx_thread = HandRxThread(self)
         self._rx_packets = 0
         self._rx_bytes = 0
-        self._pos_data = JointData()
+        self._pos_input = JointData()
         self._pos_update = 0
         self._pos_update_prev = 0
-        self._torque_data = JointData()
+        self._torque_input = JointData()
         self._torque_update = 0
         self._torque_update_prev = 0
-        self._velocity_data = JointData()
+        self._velocity_input = JointData()
         self._velocity_update = 0
         self._velocity_update_prev = 0
-        self._pwm_data = JointData()
+        self._pwm_input = JointData()
         self._pwm_update = 0
         self._pwm_update_prev = 0
         self._protocol_version = protocol_version
@@ -348,7 +358,7 @@ class Hand:
         self.is_moving = False
         self._start_time = None
         self._stop_time = None
-        self._position: JointData = JointData()
+        self._position = JointData()
         self._current = JointData()
         self._velocity = JointData()
         self._touch = TouchSensors()
@@ -368,7 +378,7 @@ class Hand:
         return self._position
 
     def set_position(self, pos: JointData) -> None:
-        self._pos_data = pos
+        self._pos_input = pos
         log.debug(f"position update: {pos}")
         self._pos_update += 1
         self._tx_notify()
@@ -377,7 +387,7 @@ class Hand:
         return self._current
 
     def set_torque(self, torque: JointData) -> None:
-        self._torque_data = torque
+        self._torque_input = torque
         log.debug(f"torque update: {torque}")
         self._torque_update += 1
         self._tx_notify()
@@ -386,13 +396,13 @@ class Hand:
         return self._velocity
 
     def set_velocity(self, velocity: JointData):
-        self._velocity_data = velocity
+        self._velocity_input = velocity
         log.debug(f"velocity update: {velocity}")
         self._velocity_update += 1
         self._tx_notify()
 
     def set_pwm(self, pwm: JointData) -> None:
-        self._pwm_data = pwm
+        self._pwm_input = pwm
         log.debug(f"pwm update: {pwm}")
         self._pwm_update += 1
         self._tx_notify()
@@ -422,18 +432,29 @@ class Hand:
         self._pos_update_prev = (
             self._torque_update_prev
         ) = self._velocity_update_prev = self._pwm_update_prev = 0
-        self._tx_thread.start()
-        self._rx_thread.start()
+
+        if self.is_v1():
+            self._v1_thread.start()
+        else:
+            self._tx_thread.start()
+            self._rx_thread.start()
+
         self._start_time = time.time()
         self._stop_time = None
 
     def stop(self):
         self._run = False
-        self._rx_packets += 1
-        self._tx_notify()
-        self._tx_thread.join()
-        self._tx_thread.join()
+
+        if self.is_v1():
+            self._v1_thread.join()
+        else:
+            self._rx_packets += 1
+            self._tx_notify()
+            self._tx_thread.join()
+            self._tx_thread.join()
+
         self._stop_time = time.time()
+
 
     def stats(self):
         stats = HandStats(
@@ -460,11 +481,6 @@ class Hand:
         return stats
 
     def _command(self, command: int, data: bytes = b""):
-
-        if self.is_v1() and command == V1_READ_ONLY:
-            #i2c mode, nothing sent to just get current status
-            return
-
         if self.is_v2() and self._slave_address is not None:
             buf = struct.pack("BB", self._slave_address, command)
         else:
@@ -501,24 +517,20 @@ class Hand:
         data = struct.pack("<BB", grip, scale(speed))
         self._command(0x1D, data)
 
+    def set_v1_mode(self, mode):
+        d = struct.pack('25B', mode, *([0]*24) )
+        d += checksum(d).to_bytes(1, 'little')
+        self._comm.write(d)
+
+
     def query_command(self, replyType: ReplyType):
-        cmd = (0xA0 | replyType) if self.is_v2() else V1_READ_ONLY
-        self._command(cmd)
+        self._command(0xA0 | replyType)
+
 
     def position_command(self, replyType: ReplyType, pos: JointData) -> None:
         """
         Joint position in degrees
         """
-        def set_mode(mode):
-            d = struct.pack('25B', mode, *([0]*24) )
-            d += checksum(d).to_bytes(1, 'little')
-            self._comm.write(d)
-
-        if self.is_v1():
-            set_mode(V1_POS_UPDATE)
-            self._command( V1_POS_UPDATE, struct.pack('<6f', *pos.to_list() ) )
-            return
-
         def scale(p):
             LIMIT = 150
             p = -LIMIT if p < -LIMIT else LIMIT if p > LIMIT else p
@@ -531,10 +543,6 @@ class Hand:
         """
         Joint velocities in degrees/sec
         """
-
-        if self.is_v1():
-            return
-
         def scale(v):
             LIMIT = 3000
             v = -LIMIT if v < -LIMIT else LIMIT if v > LIMIT else v
@@ -547,10 +555,6 @@ class Hand:
         """
         Joint torques in mNM
         """
-
-        if self.is_v1():
-            return
-
         def scale(t):
             LIMIT = 3.6
             t = -LIMIT if t < -LIMIT else LIMIT if t > LIMIT else t
@@ -564,10 +568,6 @@ class Hand:
         """
         JointData should specify a PWM range or -100% to 100% for each joint
         """
-
-        if self.is_v1():
-            return
-
         def scale(t):
             LIMIT = 3546
             t = -LIMIT if t < -LIMIT else LIMIT if t > LIMIT else t
@@ -579,7 +579,6 @@ class Hand:
     def read_v1(self):
         p_len = 71
         p = self._comm.read(p_len)
-        log.debug(f"RX@{len(p)}: {HEX(p)}")
         if p is None or len(p) != p_len:
             raise ProtocolError("invalid length")
 
@@ -588,8 +587,8 @@ class Hand:
             self._rx_packets += 1
             self._tx_cond.notify()
 
-        log.debug(f"RX: {HEX(p)}")
-        data = struct.unpack('<6f45B', p)
+        log.debug(f"RX (v1): {HEX(p)}")
+        data = struct.unpack('<6f47B', p)
         pos = data[:6]
         touch = data[6:-2]
         stat = data[-2]
@@ -601,10 +600,10 @@ class Hand:
             return
 
         # convert float list to JointData
-        self._pos = JointData(*pos)
+        self._position = JointData(*pos)
         self._touch = TouchSensors.unpack(touch)
 
-        log.debug("RX: {self._pos} : {self._touch}")
+        log.debug(f"RX (pos): {self._position}")
 
 
     def read_v2(

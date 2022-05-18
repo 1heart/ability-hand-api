@@ -32,16 +32,33 @@ class I2CIO(IOBase):
 
     def read(self, len: int):
         with self.lock:
-            msg = i2c_msg.read(self.addr, len)
-            self.bus.i2c_rdwr(msg)
-            return bytes(list(msg))
+            retry = 10
+            while retry:
+                try: 
+                    msg = i2c_msg.read(self.addr, len)
+                    self.bus.i2c_rdwr(msg)
+                    return bytes(list(msg))
+                except OSError as e:
+                    log.error('read error')
+                    retry -= 1
+                    if retry == 0:
+                        raise e
+
 
     def write(self, data: bytes):
         with self.lock:
             log.debug(f'I2CTX: {HEX(data)}')
-            msg = i2c_msg.write(self.addr, data)
-            self.bus.i2c_rdwr(msg)
-            return len(data)
+            retry = 10
+            while retry:
+                try:
+                    msg = i2c_msg.write(self.addr, data)
+                    self.bus.i2c_rdwr(msg)
+                    return len(data)
+                except OSError as e:
+                    log.error("write error")
+                    retry -= 1
+                    if retry == 0:
+                        raise e
 
     def __str__(self):
         return f'I2C[{self.bus}]@0x{self.addr:x}'

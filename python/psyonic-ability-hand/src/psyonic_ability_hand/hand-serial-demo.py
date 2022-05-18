@@ -126,7 +126,7 @@ def main(comm_type):
     app = App()
     msgs = []
 
-    layout = Layout(height=30)
+    layout = Layout()
 
     info="""Keys:
     Cycle Input Mode: 'm'
@@ -156,7 +156,6 @@ def main(comm_type):
 
     log.configure(handlers=[])
     log.add('hand-serial-demo.log')
-    log.add( update_log, colorize=True )
 
     if comm_type=='mock':
         io = MockComm()
@@ -168,6 +167,8 @@ def main(comm_type):
     app.hand = Hand(io, on_error=lambda msg: update_log(msg + '\n'))
     app.hand.set_grip(Grip.Open)
 
+    time.sleep(2.0)
+
     input_thread = threading.Thread(target=get_input, args=(app,))
     input_thread.start()
 
@@ -177,6 +178,8 @@ def main(comm_type):
         app.hand.start()
 
         with Live(layout, console=console, auto_refresh=False, screen=False) as live:
+            log.add( update_log, colorize=True )
+
             while app.run:
                 while (not app.key_input.empty()) and (key:=app.key_input.get_nowait()) is not None:
                     handle_key(app, key)
@@ -201,6 +204,7 @@ def main(comm_type):
 
                 if not app.position_input_init:
                     app.position_input = app.hand.position
+                    app.position_input_init = True
 
                 requested = app.position_input.to_dict()
                 position = app.hand.position.to_dict()
@@ -244,14 +248,14 @@ def main(comm_type):
                 )
                 live.refresh()
 #                live.update(layout, refresh=True)
-                time.sleep(0.100)
+                time.sleep(0.030)
 
             app.run = False
 
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        pass
+        log.exception("error")
     finally:
         print("Shutting down")
         app.hand.stop()
