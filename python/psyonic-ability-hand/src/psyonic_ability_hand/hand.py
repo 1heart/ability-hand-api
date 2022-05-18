@@ -476,7 +476,6 @@ class Hand:
         self._command_prev = command
 
         buf += struct.pack("B", checksum(buf))
-        log.debug(f"TX:{HEX(buf)}")
         self._comm.write(buf)
 
         self._tx_bytes += len(buf)
@@ -510,8 +509,13 @@ class Hand:
         """
         Joint position in degrees
         """
+        def set_mode(mode):
+            d = struct.pack('25B', mode, *([0]*24) )
+            d += checksum(d).to_bytes(1, 'little')
+            self._comm.write(d)
 
         if self.is_v1():
+            set_mode(V1_POS_UPDATE)
             self._command( V1_POS_UPDATE, struct.pack('<6f', *pos.to_list() ) )
             return
 

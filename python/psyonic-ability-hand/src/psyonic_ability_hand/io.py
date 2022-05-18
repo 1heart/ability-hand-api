@@ -4,7 +4,11 @@ from smbus2.smbus2 import SMBus, i2c_msg
 from serial import Serial
 import threading
 from enum import IntEnum
+import binascii
 
+from . import log
+
+HEX = binascii.hexlify
 
 
 class IOBase:
@@ -34,6 +38,7 @@ class I2CIO(IOBase):
 
     def write(self, data: bytes):
         with self.lock:
+            log.debug(f'I2CTX: {HEX(data)}')
             msg = i2c_msg.write(self.addr, data)
             self.bus.i2c_rdwr(msg)
             return len(data)
@@ -49,6 +54,7 @@ class SerialIO(IOBase):
         return self.bus.read(len)
 
     def write(self, data: bytes) -> int:
+        log.debug(f'SERTX: {HEX(data)}')
         return self.bus.write(data)
 
     def __str__(self):
