@@ -30,6 +30,11 @@ TORQUE_LIMIT_MAX = 3.2
 PWM_LIMIT_MIN = 0
 PWM_LIMIT_MAX = 100.0
 
+V1_READ_ONLY = 0x31
+V1_POS_UPDATE = 0xAD
+V1_VELOCITY_UPDATE = 0xAC
+V1_TORQUE_UPDATE = 0xAB
+
 HEX = binascii.hexlify
 
 
@@ -290,7 +295,12 @@ class HandRxThread(HandThread):
         log.debug("rx thread starting")
         while hand._run:
             try:
-                hand.read()
+                if hand.is_v1():
+                    hand.read_v1()
+                   # V1/I2C will always immediately return with data
+                    time.sleep(0.030)
+                else:
+                    hand.read_v2()
             except Exception as e:
                 hand._on_error(f"RX error: {e}")
                 hand._run = False
@@ -303,17 +313,17 @@ class Hand:
         self,
         comm: IOBase,
         slave_address=0x50,
+        protocol_version=1,
         on_error: Optional[Callable[[str], None]] = None,
     ):
         self._comm = comm
         self._slave_address = slave_address
-        self._serial_mode = slave_address != None
         self._on_error = on_error or (lambda msg: log.error(msg))
         self._run = True
         self._tx_thread = HandTxThread(self)
         self._tx_packets = 0
         self._tx_bytes = 0
-        self._reply_type_prev:ReplyType = ReplyType.PositionCurrentTouch
+        self._command_prev = 0 #for v1/i2c, track the last command sent to know what size packet to read
         self._tx_cond = threading.Condition()
         self._rx_thread = HandRxThread(self)
         self._rx_packets = 0
@@ -330,6 +340,7 @@ class Hand:
         self._pwm_data = JointData()
         self._pwm_update = 0
         self._pwm_update_prev = 0
+        self._protocol_version = protocol_version
 
         self.width = 0
         self.max_width = 100.0
@@ -344,8 +355,14 @@ class Hand:
         self._motor_status = MotorHotStatus()
 
         log.debug(
-            f"initializing hand over {comm} overlapped-io-mode: {'enabled' if self._serial_mode else 'disabled'} "
+            f"initializing hand over {comm} protocol version: { self._protocol_version } "
         )
+
+    def is_v1(self):
+        return self._protocol_version == 1
+
+    def is_v2(self):
+        return self._protocol_version == 2
 
     def get_position(self):
         return self._position
@@ -443,14 +460,20 @@ class Hand:
         return stats
 
     def _command(self, command: int, data: bytes = b""):
-        if self._slave_address:
+
+        if self.is_v1() and command == V1_READ_ONLY:
+            #i2c mode, nothing sent to just get current status
+            return
+
+        if self.is_v2() and self._slave_address is not None:
             buf = struct.pack("BB", self._slave_address, command)
         else:
             buf = command.to_bytes(1, "little")
+
         if data:
             buf += data
 
-        self._reply_type_prev = ReplyType(command & 0x3)
+        self._command_prev = command
 
         buf += struct.pack("B", checksum(buf))
         log.debug(f"TX:{HEX(buf)}")
@@ -480,12 +503,17 @@ class Hand:
         self._command(0x1D, data)
 
     def query_command(self, replyType: ReplyType):
-        self._command(0xA0 | replyType)
+        cmd = (0xA0 | replyType) if self.is_v2() else V1_READ_ONLY
+        self._command(cmd)
 
     def position_command(self, replyType: ReplyType, pos: JointData) -> None:
         """
         Joint position in degrees
         """
+
+        if self.is_v1():
+            self._command( V1_POS_UPDATE, struct.pack('<6f', *pos.to_list() ) )
+            return
 
         def scale(p):
             LIMIT = 150
@@ -500,6 +528,9 @@ class Hand:
         Joint velocities in degrees/sec
         """
 
+        if self.is_v1():
+            return
+
         def scale(v):
             LIMIT = 3000
             v = -LIMIT if v < -LIMIT else LIMIT if v > LIMIT else v
@@ -512,6 +543,9 @@ class Hand:
         """
         Joint torques in mNM
         """
+
+        if self.is_v1():
+            return
 
         def scale(t):
             LIMIT = 3.6
@@ -527,6 +561,9 @@ class Hand:
         JointData should specify a PWM range or -100% to 100% for each joint
         """
 
+        if self.is_v1():
+            return
+
         def scale(t):
             LIMIT = 3546
             t = -LIMIT if t < -LIMIT else LIMIT if t > LIMIT else t
@@ -535,56 +572,73 @@ class Hand:
         data = struct.pack("<6h", *[scale(t) for t in pwm.to_list()])
         self._command(0x40 | replyType, data)
 
-    def read(
+    def read_v1(self):
+        p_len = 71
+        p = self._comm.read(p_len)
+        log.debug(f"RX@{len(p)}: {HEX(p)}")
+        if p is None or len(p) != p_len:
+            raise ProtocolError("invalid length")
+
+        with self._tx_cond:
+            self._rx_bytes += 1
+            self._rx_packets += 1
+            self._tx_cond.notify()
+
+        log.debug(f"RX: {HEX(p)}")
+        data = struct.unpack('<6f45B', p)
+        pos = data[:6]
+        touch = data[6:-2]
+        stat = data[-2]
+        cksum = data[-1]
+        cksum_calc = checksum(p[:-1])
+
+        if cksum != cksum_calc:
+            log.warning( f'packet checksum error: expected 0x{cksum_calc} received 0x{cksum}')
+            return
+
+        # convert float list to JointData
+        self._pos = JointData(*pos)
+        self._touch = TouchSensors.unpack(touch)
+
+        log.debug("RX: {self._pos} : {self._touch}")
+
+
+    def read_v2(
         self,
     ) -> None:
         p_type:Optional[bytes] = None
         p_len = 0
         p_sum = 0
 
-        if self._serial_mode:
-            p_type = self._comm.read(1)
+        p_type = self._comm.read(1)
 
-            if p_type is None:
-                return
+        if p_type is None:
+            return
 
-            # trigger TX thread as soon as first bytes detected
-            with self._tx_cond:
-                self._rx_bytes += 1
-                self._rx_packets += 1
-                self._tx_cond.notify()
-                time.sleep(0)
+        # trigger TX thread as soon as first bytes detected
+        with self._tx_cond:
+            self._rx_bytes += 1
+            self._rx_packets += 1
+            self._tx_cond.notify()
+            time.sleep(0)
 
-            if p_type is None or len(p_type) != 1:
-                raise ProtocolError("invalid/empty packet type")
+        if p_type is None or len(p_type) != 1:
+            raise ProtocolError("invalid/empty packet type")
 
-            format = p_type[0]
-            variant = format & 0xF
+        format = p_type[0]
+        variant = format & 0xF
 
-            if variant == 2:
-                p_len = 38
-            else:
-                p_len = 71
-
-            p = self._comm.read(p_len)
-
-            log.debug(f"RX: {HEX(p)}")
-
-            if p is None or len(p) != p_len:
-                raise ProtocolError("invalid length")
+        if variant == 2:
+            p_len = 38
         else:
-            p_len = 39 if self._reply_type_prev==ReplyType.PositionCurrentVelocity else 72
-            p = self._comm.read(p_len)
-            log.debug(f"RX@{len(p)}: {HEX(p)}")
-            if p is None or len(p) != p_len:
-                raise ProtocolError("invalid length")
-            p_type = bytes(p[0])
-            variant = p[0] & 0xF
-            with self._tx_cond:
-                self._rx_bytes += 1
-                self._rx_packets += 1
-                self._tx_cond.notify()
+            p_len = 71
 
+        p = self._comm.read(p_len)
+
+        log.debug(f"RX: {HEX(p)}")
+
+        if p is None or len(p) != p_len:
+            raise ProtocolError("invalid length")
 
         self._rx_bytes += len(p)
 
@@ -594,7 +648,7 @@ class Hand:
         # reassemble header for checksum calc
         p = p_type + data
 
-        log.debug(f"calculated checksum: {p_sum:x}")        
+        log.debug(f"calculated checksum: {p_sum:x}")
 
         if p_sum != checksum(p):
             raise ProtocolError(
