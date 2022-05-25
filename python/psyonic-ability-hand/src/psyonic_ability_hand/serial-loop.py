@@ -5,7 +5,7 @@ import serial
 #GPIO.setup(18, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 port = "/dev/ttyUSB0"
-baud = 460800
+baud = 230400
 
 print(f"opening {port} at {baud}")
 #ser=serial.Serial("/dev/ttyS0", baud)
