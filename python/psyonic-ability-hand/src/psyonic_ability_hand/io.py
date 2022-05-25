@@ -12,6 +12,9 @@ HEX = binascii.hexlify
 
 
 class IOBase:
+    def reset(self):
+        pass
+
     def read(self, len: int) -> Optional[bytes]:
         pass
 
@@ -65,14 +68,19 @@ class I2CIO(IOBase):
 
 class SerialIO(IOBase):
     def __init__(self, device="/dev/ttyUSB0"):
-        self.bus = Serial(device, 460800)
+        self.bus = Serial(device, 230400)
+
+    def reset(self):
+        self.bus.reset_input_buffer()
 
     def read(self, len: int) -> Optional[bytes]:
         return self.bus.read(len)
 
     def write(self, data: bytes) -> int:
-        log.debug(f'SERTX: {HEX(data)}')
-        return self.bus.write(data)
+        data_len = self.bus.write(data)
+        self.bus.flush()
+        return data_len
+
 
     def __str__(self):
         return f'{self.bus}'
