@@ -2,12 +2,13 @@ import time
 
 from psyonic_ability_hand import log
 from psyonic_ability_hand.hand import Hand, MockComm
+from psyonic_ability_hand.io import SerialIO
 
 
 def main():
     log.info("starting mt test")
 
-    hand = Hand(MockComm())
+    hand = Hand(SerialIO())
 
     try:
         hand.start()
