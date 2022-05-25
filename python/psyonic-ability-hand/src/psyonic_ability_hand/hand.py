@@ -146,10 +146,11 @@ GEAR_RATIO = 649
 GEAR_RATIO_TR = 162.45
 
 
-def checksum(data):
+def checksum(data, dlen=None):
     cksum = 0
-    for d in data:
-        cksum = cksum + d
+    dlen = dlen or len(data)
+    for i in range(0, dlen):
+        cksum = cksum + data[i]
     return (-cksum) & 0xFF
 
 
@@ -259,46 +260,49 @@ class HandTxThread(HandThread):
         log.debug("tx thread starting")
         replyType = ReplyType.PositionCurrentTouch
 
-        pos_updated = lambda: hand._pos_update != hand._pos_update_prev
-        torque_updated = lambda: hand._torque_update != hand._torque_update_prev
-        velocity_updated = lambda: hand._velocity_update != hand._velocity_update_prev
-        pwm_updated = lambda: hand._pwm_update != hand._pwm_update_prev
+        #pos_updated = lambda: hand._pos_update != hand._pos_update_prev
+        # torque_updated = lambda: hand._torque_update != hand._torque_update_prev
+        # velocity_updated = lambda: hand._velocity_update != hand._velocity_update_prev
+        # pwm_updated = lambda: hand._pwm_update != hand._pwm_update_prev
         rx_ready = lambda: hand._tx_packets == hand._rx_packets
 
         while hand._run:
             timed_out = False
-            with hand._tx_cond:
-                while not rx_ready():
-                    timed_out = not hand._tx_cond.wait(STALL_TIMEOUT)
-                    if timed_out:
-                        hand._on_error(f"Tx/Rx sync error")
-                        break
-
-            if timed_out:
-                hand._tx_packets = hand._rx_packets
-                continue
 
             try:
-                if pos_updated():
-                    hand.position_command(replyType, hand._pos_input)
-                    hand._pos_update_prev = hand._pos_update
-                elif torque_updated():
-                    hand.torque_command(replyType, hand._torque_input)
-                    hand._torque_update_prev = hand._torque_update
-                elif velocity_updated():
-                    hand.velocity_command(replyType, hand._velocity_input)
-                    hand._velocity_update_prev = hand._velocity_update
-                elif pwm_updated():
-                    hand.pwm_command(replyType, hand._pwm_input)
-                    hand._pwm_update_prev = hand._pwm_update
-                elif rx_ready():
-                    hand.query_command(replyType)
+#                with hand._tx_cond:
+#                    if not rx_ready():
+#                        timed_out = not hand._tx_cond.wait(STALL_TIMEOUT)
+
+ #                   if timed_out:
+  #                      log.warning("TX stalled")
+  #                      hand._on_error(f"Tx/Rx sync error")
+   #                     hand._tx_packets = hand._rx_packets
+                    # rX_ready() will now return True below, to force an update
+
+                # if pos_updated() and not timed_out:
+                hand.position_command(replyType, hand._pos_input)
+                hand._pos_update_prev = hand._pos_update
+                    # elif torque_updated() and not timed_out:
+                    #     hand.torque_command(replyType, hand._torque_input)
+                    #     hand._torque_update_prev = hand._torque_update
+                    # elif velocity_updated() and not timed_out:
+                    #     hand.velocity_command(replyType, hand._velocity_input)
+                    #     hand._velocity_update_prev = hand._velocity_update
+                    # elif pwm_updated() and not timed_out:
+                    #     hand.pwm_command(replyType, hand._pwm_input)
+                    #     hand._pwm_update_prev = hand._pwm_update
+                    # elif rx_ready():
+                    #     hand.query_command(replyType)
+
             except Exception as e:
                 hand._on_error(f"TX error: {e}")
                 hand._pos_update_prev = hand._pos_update
                 hand._torque_update_prev = hand._torque_update
                 hand._velocity_update_prev = hand._velocity_update
                 hand._pwm_update_prev = hand._pwm_update
+
+            time.sleep(.020)
 
         log.debug("tx thread ending")
 
@@ -310,8 +314,12 @@ class HandRxThread(HandThread):
         while hand._run:
             try:
                 hand.read_v2()
+            except ProtocolError as e:
+                hand._on_error(f"RX error: {e}")
+                hand._comm.reset()
             except Exception as e:
                 hand._on_error(f"RX error: {e}")
+                log.exception('RX error')
                 hand._run = False
 
         log.debug("rx thread ending")
@@ -322,22 +330,24 @@ class Hand:
         self,
         comm: IOBase,
         slave_address=0x50,
-        protocol_version=1,
+        protocol_version=2,
         on_error: Optional[Callable[[str], None]] = None,
     ):
         self._comm = comm
         self._slave_address = slave_address
-        self._on_error = on_error or (lambda msg: log.error(msg))
+        self._on_error = on_error or (lambda msg: log.exception(msg))
         self._run = True
         self._v1_thread = HandV1Thread(self)
         self._tx_thread = HandTxThread(self)
         self._tx_packets = 0
         self._tx_bytes = 0
+        self._tx_time_prev = None
         self._command_prev = 0 #for v1/i2c, track the last command sent to know what size packet to read
         self._tx_cond = threading.Condition()
         self._rx_thread = HandRxThread(self)
         self._rx_packets = 0
         self._rx_bytes = 0
+        self._rx_time_prev = None
         self._pos_input = JointData()
         self._pos_update = 0
         self._pos_update_prev = 0
@@ -350,7 +360,7 @@ class Hand:
         self._pwm_input = JointData()
         self._pwm_update = 0
         self._pwm_update_prev = 0
-        self._protocol_version = protocol_version
+        self._protocol_version = 2
 
         self.width = 0
         self.max_width = 100.0
@@ -426,6 +436,8 @@ class Hand:
     def start(self):
         self._tx_packets = 0
         self._rx_packets = 0
+
+        self._comm.reset()
         self._pos_update = (
             self._torque_update
         ) = self._velocity_update = self._pwm_update = 0
@@ -492,8 +504,11 @@ class Hand:
         self._command_prev = command
 
         buf += struct.pack("B", checksum(buf))
+        log.debug(f'TX[{self._tx_packets}]: {HEX(buf)}')
+
         self._comm.write(buf)
 
+        self._tx_time_prev = time.time()
         self._tx_bytes += len(buf)
         self._tx_packets = (self._tx_packets or 0) + 1
 
@@ -514,7 +529,7 @@ class Hand:
 
         log.debug(f"set grip: {grip} speed: {speed}")
 
-        data = struct.pack("<BB", grip, scale(speed))
+        data = struct.pack("BB", grip, scale(speed))
         self._command(0x1D, data)
 
     def set_v1_mode(self, mode):
@@ -534,9 +549,11 @@ class Hand:
         def scale(p):
             LIMIT = 150
             p = -LIMIT if p < -LIMIT else LIMIT if p > LIMIT else p
-            return int(p * 32767 / LIMIT) & 0xFFFF
+            return int(p * 32767 / LIMIT)
 
-        data = struct.pack("<6H", *[scale(p) for p in pos.to_list()])
+        positions = pos.to_list()
+        positions = [scale(p) for p in positions]
+        data = struct.pack("<6h", *positions)
         self._command(0x10 | replyType, data)
 
     def velocity_command(self, replyType: ReplyType, vel: JointData) -> None:
@@ -548,7 +565,7 @@ class Hand:
             v = -LIMIT if v < -LIMIT else LIMIT if v > LIMIT else v
             return int(v * 32767 / LIMIT)
 
-        data = struct.pack("<6H", *[scale(v) for v in vel.to_list()])
+        data = struct.pack("<6h", *[scale(v) for v in vel.to_list()])
         self._command(0x20 | replyType, data)
 
     def torque_command(self, replyType: ReplyType, torque: JointData) -> None:
@@ -613,22 +630,27 @@ class Hand:
         p_len = 0
         p_sum = 0
 
-        p_type = self._comm.read(1)
+        log.debug("RX wait...")
 
-        if p_type is None:
+        p = self._comm.read(1)
+
+        if p is None:
+            log.warning("timed out waiting for RX")
             return
 
+        rx_time = time.time()
         # trigger TX thread as soon as first bytes detected
         with self._tx_cond:
+            log.debug("RX started.. notifying TX")
             self._rx_bytes += 1
             self._rx_packets += 1
-            self._tx_cond.notify()
-            time.sleep(0)
+#            self._tx_cond.notify()
+#            time.sleep(0)
 
-        if p_type is None or len(p_type) != 1:
+        if p is None or len(p) != 1:
             raise ProtocolError("invalid/empty packet type")
 
-        format = p_type[0]
+        format = p[0]
         variant = format & 0xF
 
         if variant == 2:
@@ -636,38 +658,40 @@ class Hand:
         else:
             p_len = 71
 
-        p = self._comm.read(p_len)
+        p += self._comm.read(p_len)
 
-        log.debug(f"RX: {HEX(p)}")
+        dRX = (rx_time - (self._rx_time_prev or rx_time)) * 1000
+        dTX = (rx_time - (self._tx_time_prev or rx_time)) * 1000
 
-        if p is None or len(p) != p_len:
+        log.debug(f"RX[{self._rx_packets-1}] dRX:{dRX:.2f}ms dTX:{dTX:.2f}ms: {HEX(p)}")
+
+        if p is None or len(p) != (p_len + 1):
             raise ProtocolError("invalid length")
 
         self._rx_bytes += len(p)
 
         p_sum = p[-1]
         # strip received checksum for checksum calc
-        data = p[:-1]
-        # reassemble header for checksum calc
-        p = p_type + data
 
-        log.debug(f"calculated checksum: {p_sum:x}")
+        p_sum_calc = checksum(p, len(p)-1 )
 
-        if p_sum != checksum(p):
+        if p_sum != p_sum_calc:
             raise ProtocolError(
-                f"checksum failed: received {p_sum} expected: {checksum(p)}"
+                f"checksum failed: received 0x{p_sum:02X} expected: 0x{p_sum_calc:02X} : {HEX(p)}"
             )
 
         # variant 0: [ (position, motor current), ... ]  | [ touch sensor, ... ] | hot/cold status
         # variant 1: [ (position, rotor velocity), ... ] | [ touch sensor, ... ] | hot/cold status
         # variant 2: [ (position, motor current), ... ] | [ rotor velocity, ... ] | hot/cold status
 
-        self._motor_status = MotorHotStatus.unpack(data[-1])
+        self._motor_status = MotorHotStatus.unpack(p[-2])
 
         # each finger: [position,current,..] or [position,velocity,...]
-        d = struct.unpack("<12h", data[:24])
+        d = struct.unpack("<12h", p[1:1+24])
 
-        decode_position = lambda pos: [p * 150 / 32767 for p in pos]
+        def decode_position(pos):
+            pos = [p * 150 / 32767 for p in pos]
+            return pos
         decode_current = lambda qv: [d * 0.540 / 7000 for d in qv]
         decode_velocity = lambda qv: [d * 3000 / 32767 for d in qv]
 
@@ -676,15 +700,17 @@ class Hand:
 
         if variant == 0:
             self._current = JointData(*decode_current(qv))
-            self._touch = TouchSensors.unpack(data[24 : 24 + 45])
+            self._touch = TouchSensors.unpack(p[1+24 : 1 + 24 + 45])
         elif variant == 1:
             self._velocity = JointData(*decode_velocity(qv))
-            self._touch = TouchSensors.unpack(data[24 : 24 + 45])
+            self._touch = TouchSensors.unpack(p[1+24 : 1 + 24 + 45])
         elif variant == 2:
             # each finger: u16 rotor velocity
             self._current = JointData(*decode_current(qv))
             self._velocity = JointData(
-                *decode_velocity(struct.unpack("<6H", data[24:-1]))
+                *decode_velocity(struct.unpack("<6h", p[1+24:-2]))
             )
         else:
             raise ProtocolError(f"Unsupported reply variant; {variant}")
+
+        self._rx_time_prev = rx_time
