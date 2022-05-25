@@ -32,6 +32,7 @@ from psyonic_ability_hand.io import I2CIO, SerialIO
 console = Console()
 
 LOG_FILE_NAME = "hand-demo.log"
+LOG_LINES = 30
 
 class AppMode(IntEnum):
     Position = 0
@@ -115,7 +116,7 @@ def get_input(app:App):
         fds = ([sys.stdin], [], [])
         ch = None
         while app.run:
-            if select.select(*fds, 0.050) == fds:
+            if select.select(*fds, 0.010) == fds:
                 app.key_input.put_nowait( sys.stdin.read(1) )
     except KeyboardInterrupt:
         pass
@@ -148,12 +149,12 @@ def main(comm_type):
         Layout(info, name="info", size=13),
         Layout(" ", name="stats", size=1),
         Layout(" ", name="table", size=10),
-        Layout(" ", name="log")
+        Layout(" ", name="log", size=LOG_LINES)
     )
 
     def update_log(msg):
         nonlocal msgs
-        msgs = msgs[-9:] + [msg]
+        msgs = msgs[-LOG_LINES:] + [msg]
         layout['log'].update(Text(''.join( msgs ) ))
 
     log.configure(handlers=[])
@@ -162,7 +163,7 @@ def main(comm_type):
     if comm_type=='mock':
         io = MockComm()
     elif comm_type == 'serial':
-        raise Exception("not implemented")
+        io = SerialIO()
     elif comm_type == 'i2c':
         io = I2CIO()
 
@@ -245,12 +246,12 @@ def main(comm_type):
                 st = app.hand.stats()
                 layout["stats"].update(
                     Text(
-                        f"Baud: RX[{st.rx_baud:> 10d}]  TX[{st.tx_baud:> 10d}]  Packets: RX[{st.rx_packets}] TX[{st.tx_packets}]"
+                        f"Baud: RX[{st.rx_baud:> 10d}]  TX[{st.tx_baud:> 10d}]  Packets: TX[{st.tx_packets}] RX[{st.rx_packets}] Dropped[{st.tx_packets - st.rx_packets}]"
                     )
                 )
                 live.refresh()
 #                live.update(layout, refresh=True)
-                time.sleep(0.030)
+                time.sleep(0.060)
 
             app.run = False
 
