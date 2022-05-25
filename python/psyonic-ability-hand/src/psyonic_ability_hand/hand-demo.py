@@ -46,7 +46,7 @@ class App:
     run: bool = True
     position_input = JointData()
     position_input_init = False
-    velocity_input = JointData(50, 50, 50, 50, 50, 50)
+    velocity_input = JointData(0, 0, 0, 0, 0, 0)
     torque_input = JointData()
     pwm_input = JointData()
     initialized: bool = False

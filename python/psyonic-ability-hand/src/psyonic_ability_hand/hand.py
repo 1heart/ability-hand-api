@@ -217,6 +217,13 @@ class MockComm(IOBase):
     def __str__(self):
         return f"MockBus"
 
+class ControlMode(IntEnum):
+    Query = 0
+    Position = 1
+    Velocity = 2
+    Torque = 3
+    Pwm = 4
+
 
 @dataclass
 class HandStats:
@@ -260,47 +267,23 @@ class HandTxThread(HandThread):
         log.debug("tx thread starting")
         replyType = ReplyType.PositionCurrentTouch
 
-        #pos_updated = lambda: hand._pos_update != hand._pos_update_prev
-        # torque_updated = lambda: hand._torque_update != hand._torque_update_prev
-        # velocity_updated = lambda: hand._velocity_update != hand._velocity_update_prev
-        # pwm_updated = lambda: hand._pwm_update != hand._pwm_update_prev
         rx_ready = lambda: hand._tx_packets == hand._rx_packets
 
         while hand._run:
             timed_out = False
 
             try:
-#                with hand._tx_cond:
-#                    if not rx_ready():
-#                        timed_out = not hand._tx_cond.wait(STALL_TIMEOUT)
-
- #                   if timed_out:
-  #                      log.warning("TX stalled")
-  #                      hand._on_error(f"Tx/Rx sync error")
-   #                     hand._tx_packets = hand._rx_packets
-                    # rX_ready() will now return True below, to force an update
-
-                # if pos_updated() and not timed_out:
-                hand.position_command(replyType, hand._pos_input)
-                hand._pos_update_prev = hand._pos_update
-                    # elif torque_updated() and not timed_out:
+                if hand._control_mode == ControlMode.Position:
+                    hand.position_command(replyType, hand._pos_input)
+                elif hand._control_mode == ControlMode.Velocity:
+                    hand.velocity_command(replyType, hand._velocity_input)
                     #     hand.torque_command(replyType, hand._torque_input)
-                    #     hand._torque_update_prev = hand._torque_update
-                    # elif velocity_updated() and not timed_out:
-                    #     hand.velocity_command(replyType, hand._velocity_input)
-                    #     hand._velocity_update_prev = hand._velocity_update
-                    # elif pwm_updated() and not timed_out:
                     #     hand.pwm_command(replyType, hand._pwm_input)
-                    #     hand._pwm_update_prev = hand._pwm_update
-                    # elif rx_ready():
-                    #     hand.query_command(replyType)
+                elif hand._control_mode == ControlMode.Query:
+                    hand.query_command(replyType)
 
             except Exception as e:
                 hand._on_error(f"TX error: {e}")
-                hand._pos_update_prev = hand._pos_update
-                hand._torque_update_prev = hand._torque_update
-                hand._velocity_update_prev = hand._velocity_update
-                hand._pwm_update_prev = hand._pwm_update
 
             time.sleep(.020)
 
@@ -342,6 +325,7 @@ class Hand:
         self._tx_packets = 0
         self._tx_bytes = 0
         self._tx_time_prev = None
+        self._control_mode = ControlMode.Query
         self._command_prev = 0 #for v1/i2c, track the last command sent to know what size packet to read
         self._tx_cond = threading.Condition()
         self._rx_thread = HandRxThread(self)
@@ -349,17 +333,9 @@ class Hand:
         self._rx_bytes = 0
         self._rx_time_prev = None
         self._pos_input = JointData()
-        self._pos_update = 0
-        self._pos_update_prev = 0
         self._torque_input = JointData()
-        self._torque_update = 0
-        self._torque_update_prev = 0
         self._velocity_input = JointData()
-        self._velocity_update = 0
-        self._velocity_update_prev = 0
         self._pwm_input = JointData()
-        self._pwm_update = 0
-        self._pwm_update_prev = 0
         self._protocol_version = 2
 
         self.width = 0
@@ -390,8 +366,7 @@ class Hand:
     def set_position(self, pos: JointData) -> None:
         self._pos_input = pos
         log.debug(f"position update: {pos}")
-        self._pos_update += 1
-        self._tx_notify()
+        self._control_mode = ControlMode.Position
 
     def get_current(self):
         return self._current
@@ -399,8 +374,7 @@ class Hand:
     def set_torque(self, torque: JointData) -> None:
         self._torque_input = torque
         log.debug(f"torque update: {torque}")
-        self._torque_update += 1
-        self._tx_notify()
+        self._control_mode = ControlMode.Torque
 
     def get_velocity(self):
         return self._velocity
@@ -408,14 +382,12 @@ class Hand:
     def set_velocity(self, velocity: JointData):
         self._velocity_input = velocity
         log.debug(f"velocity update: {velocity}")
-        self._velocity_update += 1
-        self._tx_notify()
+        self._control_mode = ControlMode.Velocity
 
     def set_pwm(self, pwm: JointData) -> None:
         self._pwm_input = pwm
         log.debug(f"pwm update: {pwm}")
-        self._pwm_update += 1
-        self._tx_notify()
+        self._control_mode = ControlMode.Pwm
 
     def get_touch(self):
         return self._touch
@@ -434,16 +406,10 @@ class Hand:
             self._tx_cond.notify()
 
     def start(self):
+        self._control_mode = ControlMode.Query
         self._tx_packets = 0
         self._rx_packets = 0
-
         self._comm.reset()
-        self._pos_update = (
-            self._torque_update
-        ) = self._velocity_update = self._pwm_update = 0
-        self._pos_update_prev = (
-            self._torque_update_prev
-        ) = self._velocity_update_prev = self._pwm_update_prev = 0
 
         if self.is_v1():
             self._v1_thread.start()
