@@ -113,6 +113,9 @@ class TouchSensors:
     def to_dict(self):
         return dataclasses.asdict(self)
 
+    def to_list(self):
+        return dataclasses.astuple(self)
+
     @staticmethod
     def unpack(data):
         if len(data) != 45:
@@ -365,7 +368,6 @@ class Hand:
         self._tx_time_prev = None
         self._control_mode = ControlMode.Query
         self._command_prev = 0 #for v1/i2c, track the last command sent to know what size packet to read
-        self._tx_cond = threading.Condition()
         self._rx_thread = HandRxThread(self)
         self._rx_packets = 0
         self._rx_bytes = 0
@@ -441,9 +443,6 @@ class Hand:
     touch = property(get_touch)
     motor_status = property(get_motor_status)
 
-    def _tx_notify(self):
-        with self._tx_cond:
-            self._tx_cond.notify()
 
     def start(self):
         self._control_mode = ControlMode.Query
@@ -607,10 +606,8 @@ class Hand:
         if p is None or len(p) != p_len:
             raise ProtocolError("invalid length")
 
-        with self._tx_cond:
-            self._rx_bytes += 1
-            self._rx_packets += 1
-            self._tx_cond.notify()
+        self._rx_bytes += 1
+        self._rx_packets += 1
 
         log.debug(f"RX (v1): {HEX(p)}")
         data = struct.unpack('<6f47B', p)
@@ -638,8 +635,6 @@ class Hand:
         p_len = 0
         p_sum = 0
 
-        log.debug("RX wait...")
-
         p = self._comm.read(1)
 
         if p is None:
@@ -648,12 +643,8 @@ class Hand:
 
         rx_time = time.time()
         # trigger TX thread as soon as first bytes detected
-        with self._tx_cond:
-            log.debug("RX started.. notifying TX")
-            self._rx_bytes += 1
-            self._rx_packets += 1
-#            self._tx_cond.notify()
-#            time.sleep(0)
+        self._rx_bytes += 1
+        self._rx_packets += 1
 
         if p is None or len(p) != 1:
             raise ProtocolError("invalid/empty packet type")
@@ -724,7 +715,7 @@ class Hand:
         self._rx_time_prev = rx_time
 
 
-    def grasp(self, width:float, speed:float):
+    def grasp(self, *, width:float, speed:float):
         width = 0 if width < 0 else 1 if width > 1 else width
         speed = 0 if speed < 0 else 1 if speed > 1 else speed
 

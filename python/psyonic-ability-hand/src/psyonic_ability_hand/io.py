@@ -67,8 +67,8 @@ class I2CIO(IOBase):
         return f'I2C[{self.bus}]@0x{self.addr:x}'
 
 class SerialIO(IOBase):
-    def __init__(self, device="/dev/ttyUSB0"):
-        self.bus = Serial(device, 230400)
+    def __init__(self, port="/dev/ttyUSB0", baud=230400):
+        self.bus = Serial(port, baud)
 
     def reset(self):
         self.bus.reset_input_buffer()
