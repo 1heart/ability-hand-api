@@ -271,7 +271,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--comm', help="'i2c' or 'serial', 'mock', default: serial", default="i2c")
+    parser.add_argument('-c', '--comm', help="'i2c' or 'serial', 'mock', default: serial", default="serial")
 
     args = parser.parse_args()
 

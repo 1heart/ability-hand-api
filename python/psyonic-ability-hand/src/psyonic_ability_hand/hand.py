@@ -168,8 +168,8 @@ class MockComm(IOBase):
         with self._cond:
             while len(self._reply) < n:
                 timed_out = not self._cond.wait(timeout=1.0)
-                if timed_out:
-                    raise Exception("read timeout")
+                # if timed_out:
+                #     raise Exception("read timeout")
 
             resp = self._reply[:n]
             self._reply = self._reply[n:]
@@ -209,8 +209,8 @@ class MockComm(IOBase):
                 self._reply += resp
                 self._cond.notify()
 
-        else:
-            raise Exception(f"unsupported link command: 0x{command:x}")
+        # else:
+        #     raise Exception(f"unsupported link command: 0x{command:x}")
 
         return len(data)
 
@@ -223,6 +223,7 @@ class ControlMode(IntEnum):
     Velocity = 2
     Torque = 3
     Pwm = 4
+    Grasp = 5
 
 
 @dataclass
@@ -281,6 +282,43 @@ class HandTxThread(HandThread):
                     #     hand.pwm_command(replyType, hand._pwm_input)
                 elif hand._control_mode == ControlMode.Query:
                     hand.query_command(replyType)
+                elif hand._control_mode == ControlMode.Grasp:
+                    # send velocity commands until actual position is aprox requested
+                    log.debug(f"grasp width {hand._grasp_width} speed {hand._grasp_speed}")
+                    # convert 0.0-1.0 'width' into joint positions:
+                    pmin = np.array(hand._position_min.to_list())
+                    pmax = np.array(hand._position_max.to_list())
+                    w = np.full(len(pmin), hand._grasp_width)
+
+                    target = ((pmax - pmin) * w) + pmin
+                    # convert speed to joint velocities. if target position is less than current, a negative velocity is used
+                    pos = np.array(hand._position.to_list())
+                    dpos = target - pos
+
+                    log.debug(f"pos:    {pos}")
+                    log.debug(f"target: {target}")
+                    log.debug(f"delta:  {dpos}")
+
+                    factor = [ VELOCITY_LIMIT_MAX if g else -VELOCITY_LIMIT_MAX for g in np.greater(target, pos) ]
+                    s = np.full(len(pmin), hand._grasp_speed)
+
+                    vel = s * factor
+                    log.debug(f"target velocities {vel}")
+
+                    close = np.isclose( pos, target, atol=4)
+                    log.debug(f"close: {close}")
+
+                    for i, c in enumerate(close):
+                        if c:
+                            vel[i] = 0
+
+                    if all(close):
+                        log.debug("switching to query mode")
+                        hand._control_mode = ControlMode.Query
+                        continue
+                    velocity = JointData(*vel)
+                    log.debug(f"velocity update: {velocity}")
+                    hand.velocity_command(replyType, velocity)
 
             except Exception as e:
                 hand._on_error(f"TX error: {e}")
@@ -349,6 +387,8 @@ class Hand:
         self._velocity = JointData()
         self._touch = TouchSensors()
         self._motor_status = MotorHotStatus()
+        self._position_min = JointData(9,9,9,9,9,-9)
+        self._position_max = JointData(90,90,90,90,20,-40)
 
         log.debug(
             f"initializing hand over {comm} protocol version: { self._protocol_version } "
@@ -419,6 +459,8 @@ class Hand:
 
         self._start_time = time.time()
         self._stop_time = None
+
+        time.sleep(0.5)
 
     def stop(self):
         self._run = False
@@ -680,3 +722,12 @@ class Hand:
             raise ProtocolError(f"Unsupported reply variant; {variant}")
 
         self._rx_time_prev = rx_time
+
+
+    def grasp(self, width:float, speed:float):
+        width = 0 if width < 0 else 1 if width > 1 else width
+        speed = 0 if speed < 0 else 1 if speed > 1 else speed
+
+        self._grasp_width = width 
+        self._grasp_speed = speed
+        self._control_mode = ControlMode.Grasp
