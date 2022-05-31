@@ -15,52 +15,54 @@ from .io import IOBase
 
 from psyonic_ability_hand import log
 
-# time in seconds to wait before triggering a query in case of packet drops
-STALL_TIMEOUT = 0.250
+# packet transmission rate for v1/i2c
+HAND_V1_TX_SEC = .030
+# packet transmission rate for v2/serial
+HAND_V2_TX_SEC = .020
 
+# limits according to psyonic documentation
 POSITION_LIMIT_MIN = 0.0
 POSITION_LIMIT_MAX = 150.0
-
 VELOCITY_LIMIT_MIN = 0
 VELOCITY_LIMIT_MAX = 100.0
-
 TORQUE_LIMIT_MIN = -3.2
 TORQUE_LIMIT_MAX = 3.2
-
 PWM_LIMIT_MIN = 0
 PWM_LIMIT_MAX = 100.0
 
+# V1/I2C control modes
 V1_READ_ONLY = 0x31
 V1_POS_UPDATE = 0xAD
 V1_VELOCITY_UPDATE = 0xAC
 V1_TORQUE_UPDATE = 0xAB
 
-HEX = binascii.hexlify
+GEAR_RATIO = 649
+GEAR_RATIO_TR = 162.45
 
+HEX = binascii.hexlify
 
 class ProtocolError(Exception):
     pass
 
-
+# V1/I2C interface mode
 class Mode(IntEnum):
     Query = 0
     GripControl = 0x1D
     PosControl = 0xAD
 
-
+# V1/I2C Preprogrammed grips
 class Grip(IntEnum):
     Open = 0
     PowerGrasp = 1
     KeyGrasp = 2
     PinchGrasp = 3
     ChuckGrasp = 4
-
     Point = 9
-
     Handshake = 17
 
 
 @dataclass
+# Finger specific control data
 class JointData:
     Index: float = 0
     Middle: float = 0
@@ -77,6 +79,7 @@ class JointData:
 
 
 @dataclass
+# Finger specific motor overheated status
 class MotorHotStatus:
     Index: bool = False
     Middle: bool = False
@@ -103,6 +106,8 @@ EMPTY_TOUCH = (0.0,) * NUM_TOUCH_SITES
 
 
 @dataclass
+# Finger specific touch sensor data. Some hands may have more touch sensors than others,
+# empty sensors will be 0 values. The ThumbRotator does not have sensor data.
 class TouchSensors:
     Index: Tuple[float] = EMPTY_TOUCH
     Middle: Tuple[float] = EMPTY_TOUCH
@@ -139,14 +144,12 @@ class TouchSensors:
         )
 
 
+# The reply type requested. The defaults is PositionCurrentTouch
 class ReplyType(IntEnum):
     PositionCurrentTouch = 0
     PositionVelocityTouch = 1
     PositionCurrentVelocity = 2
 
-
-GEAR_RATIO = 649
-GEAR_RATIO_TR = 162.45
 
 
 def checksum(data, dlen=None):
@@ -170,16 +173,14 @@ class MockComm(IOBase):
     def read(self, n: int = 1) -> Optional[bytes]:
         with self._cond:
             while len(self._reply) < n:
-                timed_out = not self._cond.wait(timeout=1.0)
-                # if timed_out:
-                #     raise Exception("read timeout")
+                self._cond.wait(timeout=1.0)
 
             resp = self._reply[:n]
             self._reply = self._reply[n:]
             return resp
 
     def write(self, data: bytes) -> int:
-        slave_address, command = data[:2]
+        _, command = data[:2]
 
         if command in (0x1D,):
             pass
@@ -212,14 +213,12 @@ class MockComm(IOBase):
                 self._reply += resp
                 self._cond.notify()
 
-        # else:
-        #     raise Exception(f"unsupported link command: 0x{command:x}")
-
         return len(data)
 
     def __str__(self):
         return f"MockBus"
 
+# Current command mode. The mode switches when a command like set_position or set_velocity is used
 class ControlMode(IntEnum):
     Query = 0
     Position = 1
@@ -259,10 +258,10 @@ class HandV1Thread(HandThread):
             try:
                 hand._command( V1_POS_UPDATE, struct.pack('<6f', *hand._pos_input.to_list() ) )
                 hand.read_v1()
-                time.sleep(0.030)
+                time.sleep(HAND_V1_TX_SEC)
             except Exception as e:
                 hand._on_error(f"v1 error: {e}")
-                self.exception = e 
+                self.exception = e
                 hand._run = False
 
 class HandTxThread(HandThread):
@@ -271,18 +270,12 @@ class HandTxThread(HandThread):
         log.debug("tx thread starting")
         replyType = ReplyType.PositionCurrentTouch
 
-        rx_ready = lambda: hand._tx_packets == hand._rx_packets
-
         while hand._run:
-            timed_out = False
-
             try:
                 if hand._control_mode == ControlMode.Position:
                     hand.position_command(replyType, hand._pos_input)
                 elif hand._control_mode == ControlMode.Velocity:
                     hand.velocity_command(replyType, hand._velocity_input)
-                    #     hand.torque_command(replyType, hand._torque_input)
-                    #     hand.pwm_command(replyType, hand._pwm_input)
                 elif hand._control_mode == ControlMode.Query:
                     hand.query_command(replyType)
                 elif hand._control_mode == ControlMode.Grasp:
@@ -326,7 +319,7 @@ class HandTxThread(HandThread):
             except Exception as e:
                 hand._on_error(f"TX error: {e}")
 
-            time.sleep(.020)
+            time.sleep(HAND_V2_TX_SEC)
 
         log.debug("tx thread ending")
 
@@ -462,6 +455,7 @@ class Hand:
         self._start_time = time.time()
         self._stop_time = None
 
+        # give some time for at least one position update
         time.sleep(0.5)
 
     def stop(self):
@@ -503,7 +497,6 @@ class Hand:
 
     def _command(self, command: int, data: bytes = b""):
         if self.is_v2() and self._slave_address is not None:
-            log.debug("is v2")
             buf = struct.pack("BB", self._slave_address, command)
         else:
             buf = command.to_bytes(1, "little")
@@ -535,7 +528,7 @@ class Hand:
 
         def scale(speed):
             speed = 0 if speed < 0 else 1.0 if speed > 1.0 else speed
-            # speed is actually period, higher values go slower 
+            # speed is actually period, higher values go slower
             speed = 1.0 - speed
             return min(1, int(speed * 254))
 
@@ -662,7 +655,11 @@ class Hand:
         else:
             p_len = 71
 
-        p += self._comm.read(p_len)
+        ret = self._comm.read(p_len)
+        if ret is None or len(ret) != p_len:
+            raise ProtocolError("incomplete packet received")
+
+        p += ret
 
         dRX = (rx_time - (self._rx_time_prev or rx_time)) * 1000
         dTX = (rx_time - (self._tx_time_prev or rx_time)) * 1000
@@ -675,10 +672,7 @@ class Hand:
         self._rx_bytes += len(p)
 
         p_sum = p[-1]
-        # strip received checksum for checksum calc
-
         p_sum_calc = checksum(p, len(p)-1 )
-
         if p_sum != p_sum_calc:
             raise ProtocolError(
                 f"checksum failed: received 0x{p_sum:02X} expected: 0x{p_sum_calc:02X} : {HEX(p)}"
@@ -693,9 +687,7 @@ class Hand:
         # each finger: [position,current,..] or [position,velocity,...]
         d = struct.unpack("<12h", p[1:1+24])
 
-        def decode_position(pos):
-            pos = [p * 150 / 32767 for p in pos]
-            return pos
+        decode_position = lambda pos: [p * 150 / 32767 for p in pos]
         decode_current = lambda qv: [d * 0.540 / 7000 for d in qv]
         decode_velocity = lambda qv: [d * 3000 / 32767 for d in qv]
 
@@ -724,6 +716,6 @@ class Hand:
         width = 0 if width < 0 else 1 if width > 1 else width
         speed = 0 if speed < 0 else 1 if speed > 1 else speed
 
-        self._grasp_width = width 
+        self._grasp_width = width
         self._grasp_speed = speed
         self._control_mode = ControlMode.Grasp
