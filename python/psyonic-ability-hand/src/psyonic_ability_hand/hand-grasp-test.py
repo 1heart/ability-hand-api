@@ -34,12 +34,6 @@ def main():
         hand.grasp(width=0, speed=6)
         time.sleep(10)
 
-
-        # t = 0
-        # while True:
-        #     t += 1
-        #     time.sleep(1)
-        #     print(hand.stats())
     except KeyboardInterrupt:
         pass
     finally:
