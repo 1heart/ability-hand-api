@@ -99,6 +99,6 @@ In velocity set mode, the `JointData` provides degrees per second for each finge
 
 Additionally, the status of the Touch Sensors can be retrieved via:
 
-```
+```py
 get_touch()
 ```
