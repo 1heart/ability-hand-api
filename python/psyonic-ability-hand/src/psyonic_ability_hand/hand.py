@@ -478,7 +478,7 @@ class Hand:
         else:
             self._rx_packets += 1
             self._tx_thread.join()
-            self._tx_thread.join()
+            self._rx_thread.join()
 
         self._stop_time = time.time()
 
