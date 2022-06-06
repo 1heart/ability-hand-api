@@ -16,9 +16,9 @@ from .io import IOBase
 from psyonic_ability_hand import log
 
 # packet transmission rate for v1/i2c
-HAND_V1_TX_SEC = .030
+HAND_V1_TX_SEC = 0.030
 # packet transmission rate for v2/serial
-HAND_V2_TX_SEC = .020
+HAND_V2_TX_SEC = 0.020
 
 # limits according to psyonic documentation
 POSITION_LIMIT_MIN = 0.0
@@ -41,14 +41,17 @@ GEAR_RATIO_TR = 162.45
 
 HEX = binascii.hexlify
 
+
 class ProtocolError(Exception):
     pass
+
 
 # V1/I2C interface mode
 class Mode(IntEnum):
     Query = 0
     GripControl = 0x1D
     PosControl = 0xAD
+
 
 # V1/I2C Preprogrammed grips
 class Grip(IntEnum):
@@ -151,7 +154,6 @@ class ReplyType(IntEnum):
     PositionCurrentVelocity = 2
 
 
-
 def checksum(data, dlen=None):
     cksum = 0
     dlen = dlen or len(data)
@@ -207,7 +209,7 @@ class MockComm(IOBase):
             chk = checksum(resp)
             resp += chk.to_bytes(1, "little")
 
-            time.sleep(.002)
+            time.sleep(0.002)
 
             with self._cond:
                 self._reply += resp
@@ -217,6 +219,7 @@ class MockComm(IOBase):
 
     def __str__(self):
         return f"MockBus"
+
 
 # Current command mode. The mode switches when a command like set_position or set_velocity is used
 class ControlMode(IntEnum):
@@ -249,6 +252,7 @@ class HandThread(threading.Thread):
         self.exception = None
         self.hand = hand
 
+
 class HandV1Thread(HandThread):
     def run(self):
         hand = self.hand
@@ -256,13 +260,16 @@ class HandV1Thread(HandThread):
         hand.set_v1_mode(V1_POS_UPDATE)
         while hand._run:
             try:
-                hand._command( V1_POS_UPDATE, struct.pack('<6f', *hand._pos_input.to_list() ) )
+                hand._command(
+                    V1_POS_UPDATE, struct.pack("<6f", *hand._pos_input.to_list())
+                )
                 hand.read_v1()
                 time.sleep(HAND_V1_TX_SEC)
             except Exception as e:
                 hand._on_error(f"v1 error: {e}")
                 self.exception = e
                 hand._run = False
+
 
 class HandTxThread(HandThread):
     def run(self):
@@ -280,7 +287,9 @@ class HandTxThread(HandThread):
                     hand.query_command(replyType)
                 elif hand._control_mode == ControlMode.Grasp:
                     # send velocity commands until actual position is aprox requested
-                    log.debug(f"grasp width {hand._grasp_width} speed {hand._grasp_speed}")
+                    log.debug(
+                        f"grasp width {hand._grasp_width} speed {hand._grasp_speed}"
+                    )
                     # convert 0.0-1.0 'width' into joint positions:
                     pmin = np.array(hand._position_min.to_list())
                     pmax = np.array(hand._position_max.to_list())
@@ -295,13 +304,16 @@ class HandTxThread(HandThread):
                     log.debug(f"target: {target}")
                     log.debug(f"delta:  {dpos}")
 
-                    factor = [ VELOCITY_LIMIT_MAX if g else -VELOCITY_LIMIT_MAX for g in np.greater(target, pos) ]
+                    factor = [
+                        VELOCITY_LIMIT_MAX if g else -VELOCITY_LIMIT_MAX
+                        for g in np.greater(target, pos)
+                    ]
                     s = np.full(len(pmin), hand._grasp_speed)
 
                     vel = s * factor
                     log.debug(f"target velocities {vel}")
 
-                    close = np.isclose( pos, target, atol=4)
+                    close = np.isclose(pos, target, atol=4)
                     log.debug(f"close: {close}")
 
                     for i, c in enumerate(close):
@@ -336,7 +348,7 @@ class HandRxThread(HandThread):
                 hand._comm.reset()
             except Exception as e:
                 hand._on_error(f"RX error: {e}")
-                log.exception('RX error')
+                log.exception("RX error")
                 hand._run = False
 
         log.debug("rx thread ending")
@@ -360,7 +372,7 @@ class Hand:
         self._tx_bytes = 0
         self._tx_time_prev = None
         self._control_mode = ControlMode.Query
-        self._command_prev = 0 #for v1/i2c, track the last command sent to know what size packet to read
+        self._command_prev = 0  # for v1/i2c, track the last command sent to know what size packet to read
         self._rx_thread = HandRxThread(self)
         self._rx_packets = 0
         self._rx_bytes = 0
@@ -382,8 +394,8 @@ class Hand:
         self._velocity = JointData()
         self._touch = TouchSensors()
         self._motor_status = MotorHotStatus()
-        self._position_min = JointData(9,9,9,9,9,-9)
-        self._position_max = JointData(90,90,90,90,50,-40)
+        self._position_min = JointData(9, 9, 9, 9, 9, -9)
+        self._position_max = JointData(90, 90, 90, 90, 50, -40)
         # self._grip_positions = {
         #     "power", JointData(0, 90, 90, 0, 0, 20)
         # }
@@ -439,7 +451,6 @@ class Hand:
     touch = property(get_touch)
     motor_status = property(get_motor_status)
 
-
     def start(self):
         self._control_mode = ControlMode.Query
         self._tx_packets = 0
@@ -466,10 +477,9 @@ class Hand:
         else:
             self._rx_packets += 1
             self._tx_thread.join()
-            self._tx_thread.join()
+            self._rx_thread.join()
 
         self._stop_time = time.time()
-
 
     def stats(self):
         stats = HandStats(
@@ -507,7 +517,7 @@ class Hand:
         self._command_prev = command
 
         buf += struct.pack("B", checksum(buf))
-        log.debug(f'TX[{self._tx_packets}]: {HEX(buf)}')
+        log.debug(f"TX[{self._tx_packets}]: {HEX(buf)}")
 
         self._comm.write(buf)
 
@@ -538,19 +548,18 @@ class Hand:
         self._command(0x1D, data)
 
     def set_v1_mode(self, mode):
-        d = struct.pack('25B', mode, *([0]*24) )
-        d += checksum(d).to_bytes(1, 'little')
+        d = struct.pack("25B", mode, *([0] * 24))
+        d += checksum(d).to_bytes(1, "little")
         self._comm.write(d)
-
 
     def query_command(self, replyType: ReplyType):
         self._command(0xA0 | replyType)
-
 
     def position_command(self, replyType: ReplyType, pos: JointData) -> None:
         """
         Joint position in degrees
         """
+
         def scale(p):
             LIMIT = 150
             p = -LIMIT if p < -LIMIT else LIMIT if p > LIMIT else p
@@ -565,6 +574,7 @@ class Hand:
         """
         Joint velocities in degrees/sec
         """
+
         def scale(v):
             LIMIT = 3000
             v = -LIMIT if v < -LIMIT else LIMIT if v > LIMIT else v
@@ -577,6 +587,7 @@ class Hand:
         """
         Joint torques in mNM
         """
+
         def scale(t):
             LIMIT = 3.6
             t = -LIMIT if t < -LIMIT else LIMIT if t > LIMIT else t
@@ -590,6 +601,7 @@ class Hand:
         """
         JointData should specify a PWM range or -100% to 100% for each joint
         """
+
         def scale(t):
             LIMIT = 3546
             t = -LIMIT if t < -LIMIT else LIMIT if t > LIMIT else t
@@ -608,7 +620,7 @@ class Hand:
         self._rx_packets += 1
 
         log.debug(f"RX (v1): {HEX(p)}")
-        data = struct.unpack('<6f47B', p)
+        data = struct.unpack("<6f47B", p)
         pos = data[:6]
         touch = data[6:-2]
         stat = data[-2]
@@ -616,7 +628,9 @@ class Hand:
         cksum_calc = checksum(p[:-1])
 
         if cksum != cksum_calc:
-            log.warning( f'packet checksum error: expected 0x{cksum_calc} received 0x{cksum}')
+            log.warning(
+                f"packet checksum error: expected 0x{cksum_calc} received 0x{cksum}"
+            )
             return
 
         # convert float list to JointData
@@ -625,11 +639,10 @@ class Hand:
 
         log.debug(f"RX (pos): {self._position}")
 
-
     def read_v2(
         self,
     ) -> None:
-        p_type:Optional[bytes] = None
+        p_type: Optional[bytes] = None
         p_len = 0
         p_sum = 0
 
@@ -672,7 +685,7 @@ class Hand:
         self._rx_bytes += len(p)
 
         p_sum = p[-1]
-        p_sum_calc = checksum(p, len(p)-1 )
+        p_sum_calc = checksum(p, len(p) - 1)
         if p_sum != p_sum_calc:
             raise ProtocolError(
                 f"checksum failed: received 0x{p_sum:02X} expected: 0x{p_sum_calc:02X} : {HEX(p)}"
@@ -685,7 +698,7 @@ class Hand:
         self._motor_status = MotorHotStatus.unpack(p[-2])
 
         # each finger: [position,current,..] or [position,velocity,...]
-        d = struct.unpack("<12h", p[1:1+24])
+        d = struct.unpack("<12h", p[1 : 1 + 24])
 
         decode_position = lambda pos: [p * 150 / 32767 for p in pos]
         decode_current = lambda qv: [d * 0.540 / 7000 for d in qv]
@@ -696,23 +709,22 @@ class Hand:
 
         if variant == 0:
             self._current = JointData(*decode_current(qv))
-            self._touch = TouchSensors.unpack(p[1+24 : 1 + 24 + 45])
+            self._touch = TouchSensors.unpack(p[1 + 24 : 1 + 24 + 45])
         elif variant == 1:
             self._velocity = JointData(*decode_velocity(qv))
-            self._touch = TouchSensors.unpack(p[1+24 : 1 + 24 + 45])
+            self._touch = TouchSensors.unpack(p[1 + 24 : 1 + 24 + 45])
         elif variant == 2:
             # each finger: u16 rotor velocity
             self._current = JointData(*decode_current(qv))
             self._velocity = JointData(
-                *decode_velocity(struct.unpack("<6h", p[1+24:-2]))
+                *decode_velocity(struct.unpack("<6h", p[1 + 24 : -2]))
             )
         else:
             raise ProtocolError(f"Unsupported reply variant; {variant}")
 
         self._rx_time_prev = rx_time
 
-
-    def grasp(self, *, width:float, speed:float):
+    def grasp(self, *, width: float, speed: float):
         width = 0 if width < 0 else 1 if width > 1 else width
         speed = 0 if speed < 0 else 1 if speed > 1 else speed
 

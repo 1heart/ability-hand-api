@@ -87,3 +87,23 @@ class SerialIO(IOBase):
 
     def get_async(self):
         return True
+
+
+class MockIO(IOBase):
+    def __init__(self):
+        self._buffer = bytearray()
+
+    def reset(self):
+        pass
+
+    def read(self, len: int) -> Optional[bytes]:
+        ret, self._buffer = self._buffer[:len], self._buffer[len:]
+        return ret
+
+    def write(self, data: bytes) -> int:
+        self._buffer.extend(data)
+
+    def get_async(self):
+        return False
+
+    is_async = property(get_async)
