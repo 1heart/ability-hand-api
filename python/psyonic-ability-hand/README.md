@@ -1,5 +1,15 @@
 # Psyonic Hand Interface
 
+# Overview
+
+The hand communicates using a bidirectional, asynchronous RS-485/RS-422 connection. A thread is created to send packets to the hand, and a separate thread reads response packets from the hand. 
+In the various control modes, the rate at which packets are sent largely determines the overall quality of motion (smoothness). When a packet is sent, the hand moves a small increment towards the desired position (in position control mode). Therefore, the packets are sent at a fixed, high rate of speed (configurable as `HAND_V2_TX_SEC` in `hand.py`). When the caller commands a new position, the position data is cached and the transmit thread sends the new position repeatedly. 
+The hand, however, does not send unsolicited responses; it must be polled for status. When a position, velocity or torque is set, one of the provided parameters is the 'reply type'. The hand can respond to any of the control commands in one of three formats. Typically, only the first format is used, which provided a response containing position, current and touch sensor data. As packets are received, internal states variables are updated with the current position, current, velocity, torque, etc., depending on the requested 'reply type'.  
+Due to a variety of reasons, packets may be lost either in transmission or reception. While the hand does support a constant request/response cycle, lost packets coupled with the fact that the response packets do not contain any sort of counter or indicator of the associated transmit packet, the transmit and receive operations are largely decoupled from one another. Packets are sent to the hand as fast as is reasonable, and the hand responds as fast as it can.  
+Transmit packet sizes are 25 bytes. This provides a theoretical maximum rate of around 921 packets per second at 230400 baud. Response packet sizes, on the other hand, for the primary response format, are 72 bytes. This provides a theoretical maximum rate at 230400 baud of around 320 packets/second. 
+
+# Development
+
 This is a [python-poetry](https://python-poetry.org/) based project. To install locally,
 after installing poetry via the link, run
 ```
@@ -41,7 +51,7 @@ python src/psyonic_ability_hand/hand-grasp-test.py
 A simpler tool for stepping through opening and closing the gripper
 
 
-## Hand Interface
+## Hand Interface API
 
 `hand.py` contains `Hand` object, a typical usage might be:
 
